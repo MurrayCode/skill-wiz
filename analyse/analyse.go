@@ -16,7 +16,6 @@ func Analyze(prompt string) string {
 	if err != nil {
 		log.Fatal(err)
 	}
-
 	result, err := client.Models.GenerateContent(
 		ctx,
 		"gemini-2.5-flash",
