@@ -22,7 +22,7 @@ This tracker records implementation progress for backlog stories in `docs/backlo
 | --- | --- | --- | --- |
 | `P1-001-parser-input-variants.md` | `todo` |  |  |
 | `P1-002-skill-validation.md` | `todo` |  |  |
-| `P1-003-structured-results.md` | `todo` |  |  |
+| `P1-003-structured-results.md` | `done` | 2026-04-20 | Added reusable result and finding types, structured analyzer mapping, and tests for clean versus flagged behavior. |
 | `P1-004-analysis-error-handling.md` | `todo` |  |  |
 | `P1-005-core-test-coverage.md` | `todo` |  |  |
 
