@@ -20,7 +20,7 @@ This tracker records implementation progress for backlog stories in `docs/backlo
 
 | Story | Status | Completed On | Notes |
 | --- | --- | --- | --- |
-| `P1-001-parser-input-variants.md` | `todo` |  |  |
+| `P1-001-parser-input-variants.md` | `done` | 2026-04-20 | Added CRLF and trailing-newline parser coverage and verified `go test ./...`. |
 | `P1-002-skill-validation.md` | `todo` |  |  |
 | `P1-003-structured-results.md` | `todo` |  |  |
 | `P1-004-analysis-error-handling.md` | `todo` |  |  |

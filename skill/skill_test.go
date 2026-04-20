@@ -32,6 +32,51 @@ This is the body.`,
 			wantAudience: "developers",
 		},
 		{
+			name:         "valid skill with CRLF line endings",
+			content:      "---\r\nname: test skill\r\ndescription: a test skill\r\nlicense: MIT\r\ncompatibility: opencode\r\nmetadata:\r\n  audience: developers\r\n  workflow: standard\r\n---\r\n# Skill Body\r\nThis is the body.\r\n",
+			wantErr:      false,
+			wantName:     "test skill",
+			wantBody:     "# Skill Body\nThis is the body.",
+			wantAudience: "developers",
+		},
+		{
+			name: "valid skill without trailing newline",
+			content: `---
+name: test skill
+description: a test skill
+license: MIT
+compatibility: opencode
+metadata:
+  audience: developers
+  workflow: standard
+---
+# Skill Body
+This is the body.`,
+			wantErr:      false,
+			wantName:     "test skill",
+			wantBody:     "# Skill Body\nThis is the body.",
+			wantAudience: "developers",
+		},
+		{
+			name: "valid skill with trailing newline",
+			content: `---
+name: test skill
+description: a test skill
+license: MIT
+compatibility: opencode
+metadata:
+  audience: developers
+  workflow: standard
+---
+# Skill Body
+This is the body.
+`,
+			wantErr:      false,
+			wantName:     "test skill",
+			wantBody:     "# Skill Body\nThis is the body.",
+			wantAudience: "developers",
+		},
+		{
 			name: "missing frontmatter start",
 			content: `name: test skill
 ---
@@ -45,11 +90,28 @@ name: test skill`,
 			wantErr: true,
 		},
 		{
+			name: "malformed frontmatter",
+			content: `---
+name: [test skill
+---
+body`,
+			wantErr: true,
+		},
+		{
 			name: "empty body",
 			content: `---
 name: test skill
 ---
 `,
+			wantErr:  false,
+			wantName: "test skill",
+			wantBody: "",
+		},
+		{
+			name: "empty body at end of file",
+			content: `---
+name: test skill
+---`,
 			wantErr:  false,
 			wantName: "test skill",
 			wantBody: "",

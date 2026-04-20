@@ -25,8 +25,7 @@ type Skill struct {
 }
 
 func Parse(content string) (*Skill, error) {
-
-	sContent := string(content)
+	sContent := strings.ReplaceAll(content, "\r\n", "\n")
 	const delimiter = "---\n"
 
 	if !strings.HasPrefix(sContent, delimiter) {
@@ -34,19 +33,18 @@ func Parse(content string) (*Skill, error) {
 	}
 
 	rest := sContent[len(delimiter):]
-	endIndex := strings.Index(rest, "\n---")
+	endIndex := strings.Index(rest, "\n---\n")
+	closingFenceLen := len("\n---\n")
+	if endIndex == -1 && strings.HasSuffix(rest, "\n---") {
+		endIndex = len(rest) - len("\n---")
+		closingFenceLen = len("\n---")
+	}
 	if endIndex == -1 {
 		return nil, errors.New("invalid skill format: missing closing ---")
 	}
 
 	yamlPart := rest[:endIndex]
-
-	const closingFence = "\n---"
-	bodyStart := endIndex + len(closingFence)
-
-	if bodyStart < len(rest) && rest[bodyStart] == '\n' {
-		bodyStart++
-	}
+	bodyStart := endIndex + closingFenceLen
 
 	bodyPart := rest[bodyStart:]
 
