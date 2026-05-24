@@ -140,3 +140,62 @@ name: test skill
 		})
 	}
 }
+
+func TestValidate(t *testing.T) {
+	tests := []struct {
+		name         string
+		skill        Skill
+		wantMessages []string
+	}{
+		{
+			name:  "valid skill passes validation",
+			skill: Skill{Name: "test skill", Description: "a test skill"},
+		},
+		{
+			name:         "missing name is reported",
+			skill:        Skill{Description: "a test skill"},
+			wantMessages: []string{"field name is required"},
+		},
+		{
+			name:         "missing description is reported",
+			skill:        Skill{Name: "test skill"},
+			wantMessages: []string{"field description is required"},
+		},
+		{
+			name:         "multiple missing fields are reported",
+			skill:        Skill{},
+			wantMessages: []string{"field name is required", "field description is required"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.skill.Validate()
+			if len(tt.wantMessages) == 0 {
+				if err != nil {
+					t.Fatalf("Validate() error = %v, want nil", err)
+				}
+				return
+			}
+
+			if err == nil {
+				t.Fatal("Validate() error = nil, want validation error")
+			}
+
+			validationErr, ok := err.(ValidationErrors)
+			if !ok {
+				t.Fatalf("Validate() error type = %T, want ValidationErrors", err)
+			}
+
+			if len(validationErr) != len(tt.wantMessages) {
+				t.Fatalf("len(ValidationErrors) = %d, want %d", len(validationErr), len(tt.wantMessages))
+			}
+
+			for i, want := range tt.wantMessages {
+				if validationErr[i].Error() != want {
+					t.Fatalf("ValidationErrors[%d] = %q, want %q", i, validationErr[i].Error(), want)
+				}
+			}
+		})
+	}
+}

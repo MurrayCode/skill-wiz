@@ -24,6 +24,43 @@ type Skill struct {
 	Body          string   `yaml:"-"`
 }
 
+// ValidationError reports a single invalid field on a parsed skill.
+type ValidationError struct {
+	Field string
+}
+
+func (e ValidationError) Error() string {
+	return fmt.Sprintf("field %s is required", e.Field)
+}
+
+// ValidationErrors preserves field-level validation failures.
+type ValidationErrors []ValidationError
+
+func (e ValidationErrors) Error() string {
+	messages := make([]string, 0, len(e))
+	for _, validationErr := range e {
+		messages = append(messages, validationErr.Error())
+	}
+	return strings.Join(messages, "; ")
+}
+
+func (s Skill) Validate() error {
+	var errs ValidationErrors
+
+	if strings.TrimSpace(s.Name) == "" {
+		errs = append(errs, ValidationError{Field: "name"})
+	}
+	if strings.TrimSpace(s.Description) == "" {
+		errs = append(errs, ValidationError{Field: "description"})
+	}
+
+	if len(errs) == 0 {
+		return nil
+	}
+
+	return errs
+}
+
 func Parse(content string) (*Skill, error) {
 	sContent := strings.ReplaceAll(content, "\r\n", "\n")
 	const delimiter = "---\n"
