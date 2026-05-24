@@ -40,7 +40,7 @@ This tracker records implementation progress for backlog stories in `docs/backlo
 
 | Story | Status | Completed On | Notes |
 | --- | --- | --- | --- |
-| `P3-001-analyzer-interface.md` | `todo` |  |  |
+| `P3-001-analyzer-interface.md` | `done` | 2026-05-24 | Added a swappable analyzer interface with scanner orchestration, deterministic-only execution, Gemini adapter wiring, and verified `go test ./...`. |
 | `P3-002-prompt-hardening.md` | `todo` |  |  |
 | `P3-003-structured-llm-output.md` | `todo` |  |  |
 | `P3-004-merge-rule-and-llm-findings.md` | `todo` |  |  |

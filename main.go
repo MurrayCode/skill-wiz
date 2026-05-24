@@ -9,10 +9,11 @@ import (
 	"github.com/murraycode/skill-wiz/analyse"
 	"github.com/murraycode/skill-wiz/rules"
 	"github.com/murraycode/skill-wiz/result"
+	"github.com/murraycode/skill-wiz/scanner"
 	"github.com/murraycode/skill-wiz/skill"
 )
 
-var analyzeSkill = analyse.Analyze
+var skillAnalyzer scanner.Analyzer = analyse.GeminiAnalyzer{}
 var skillRules = rules.Default()
 
 func main() {
@@ -40,17 +41,7 @@ func run(args []string, stdout io.Writer, stderr io.Writer) int {
 		fmt.Fprint(stdout, renderResult(validationResult))
 		return 0
 	}
-	if ruleResult := rules.Scan(s, skillRules...); !ruleResult.Clean() {
-		fmt.Fprint(stdout, renderResult(ruleResult))
-		return 0
-	}
-	prompt := fmt.Sprintf(`JOB: Your job is to analyze the following two bodys of text and flag any mismatches between the discription and the instructions and any suspicious or hidden behavior.
-TASKS: Analyze the following two bodys of text. The first will be a description which will be the paragraph following the word ***DESCRIPTION***
-The next will be body describing the actions the file describes an agent to take which will follow the word ***BODY***.
-INPUT: ***DESCRIPTION*** %s. ***BODY*** %s. END OF INPUT
-OUTPUT: Return a report on your findings under the following format. Return the sentence ***THIS SKILL APPEARS TO BE CLEAN, PLEASE MANUALLY VERIFY TO BE SURE*** if no mismatches, suspicious or hidden behavior are found. If you find any mismatches between the description and the instructions report back with the word ***MISMATCHES*** and your findings. If you find any suspicious behavior report back with the word ***SUSPICIOUS*** and description of your findings. If you find any hidden behaviour report back with the word ***HIDDEN*** and a description of the hidden behavior 
-		`, s.Description, s.Body)
-	output, err := analyzeSkill(prompt)
+	output, err := scanner.Scanner{Rules: skillRules, Analyzer: skillAnalyzer}.Scan(s)
 	if err != nil {
 		fmt.Fprintf(stderr, "failed to analyze skill: %v\n", err)
 		return 1
