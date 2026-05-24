@@ -25,6 +25,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to parse skill: %v", err)
 	}
+	if validationResult := validationResultForSkill(s); !validationResult.Clean() {
+		fmt.Print(renderResult(validationResult))
+		return
+	}
 	prompt := fmt.Sprintf(`JOB: Your job is to analyze the following two bodys of text and flag any mismatches between the discription and the instructions and any suspicious or hidden behavior.
 TASKS: Analyze the following two bodys of text. The first will be a description which will be the paragraph following the word ***DESCRIPTION***
 The next will be body describing the actions the file describes an agent to take which will follow the word ***BODY***.
@@ -58,4 +62,33 @@ func renderResult(scanResult result.Result) string {
 
 func analyseCleanMessage() string {
 	return "THIS SKILL APPEARS TO BE CLEAN, PLEASE MANUALLY VERIFY TO BE SURE"
+}
+
+func validationResultForSkill(s *skill.Skill) result.Result {
+	if err := s.Validate(); err != nil {
+		validationErrs, ok := err.(skill.ValidationErrors)
+		if !ok {
+			return result.NewResult(result.Finding{
+				Source:   result.SourceValidation,
+				Category: result.Category("metadata"),
+				Severity: result.SeverityError,
+				Message:  err.Error(),
+			})
+		}
+
+		findings := make([]result.Finding, 0, len(validationErrs))
+		for _, validationErr := range validationErrs {
+			findings = append(findings, result.Finding{
+				Source:   result.SourceValidation,
+				Category: result.Category("metadata"),
+				Severity: result.SeverityError,
+				Message:  validationErr.Error(),
+				Evidence: result.Evidence{Summary: fmt.Sprintf("missing required field: %s", validationErr.Field)},
+			})
+		}
+
+		return result.NewResult(findings...)
+	}
+
+	return result.NewCleanResult()
 }
