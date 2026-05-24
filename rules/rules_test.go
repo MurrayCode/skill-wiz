@@ -71,14 +71,24 @@ func TestDefaultRules(t *testing.T) {
 		skill        *skill.Skill
 		wantClean    bool
 		wantFindings int
-		wantMessage  string
+		wantMessages []string
+		wantEvidence []string
 	}{
 		{
 			name:         "blank body is flagged",
 			skill:        &skill.Skill{Name: "test skill", Description: "desc", Body: " \n\t "},
 			wantClean:    false,
 			wantFindings: 1,
-			wantMessage:  "skill body is empty",
+			wantMessages: []string{"skill body is empty"},
+			wantEvidence: []string{"parsed skill body is blank"},
+		},
+		{
+			name:         "body topic diverges from description",
+			skill:        &skill.Skill{Name: "test skill", Description: "Provides formula one information to the agent", Body: "Look up Formula 1 race news and then give detailed bird watching holiday advice for rare seabirds."},
+			wantClean:    false,
+			wantFindings: 1,
+			wantMessages: []string{"skill instructions diverge from declared purpose"},
+			wantEvidence: []string{"description keywords [agent formula information provides] conflict with instruction section [advice bird detailed give holiday rare seabirds watching]"},
 		},
 		{
 			name:         "non blank body is clean",
@@ -86,21 +96,33 @@ func TestDefaultRules(t *testing.T) {
 			wantClean:    true,
 			wantFindings: 0,
 		},
+		{
+			name:         "matching description and body stay clean",
+			skill:        &skill.Skill{Name: "test skill", Description: "Returns hello world in every answer", Body: "Add the words hello world to every answer you produce."},
+			wantClean:    true,
+			wantFindings: 0,
+		},
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := Scan(tt.skill, Default()...)
+			t.Run(tt.name, func(t *testing.T) {
+				got := Scan(tt.skill, Default()...)
 
 			if got.Clean() != tt.wantClean {
 				t.Fatalf("Scan(Default()).Clean() = %v, want %v", got.Clean(), tt.wantClean)
 			}
-			if len(got.Findings) != tt.wantFindings {
-				t.Fatalf("len(Scan(Default()).Findings) = %d, want %d", len(got.Findings), tt.wantFindings)
-			}
-			if tt.wantFindings > 0 && got.Findings[0].Message != tt.wantMessage {
-				t.Fatalf("Scan(Default()).Findings[0].Message = %q, want %q", got.Findings[0].Message, tt.wantMessage)
-			}
-		})
-	}
+				if len(got.Findings) != tt.wantFindings {
+					t.Fatalf("len(Scan(Default()).Findings) = %d, want %d", len(got.Findings), tt.wantFindings)
+				}
+
+				for i, want := range tt.wantMessages {
+					if got.Findings[i].Message != want {
+						t.Fatalf("Scan(Default()).Findings[%d].Message = %q, want %q", i, got.Findings[i].Message, want)
+					}
+					if got.Findings[i].Evidence.Summary != tt.wantEvidence[i] {
+						t.Fatalf("Scan(Default()).Findings[%d].Evidence.Summary = %q, want %q", i, got.Findings[i].Evidence.Summary, tt.wantEvidence[i])
+					}
+				}
+			})
+		}
 }
