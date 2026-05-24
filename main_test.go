@@ -98,10 +98,10 @@ func TestRenderValidationResult(t *testing.T) {
 	))
 
 	wants := []string{
-		"Scan flagged 2 finding(s)",
-		"[error] metadata: field name is required",
+		"Scan flagged 2 finding(s) from validation checks",
+		"[error] metadata (validation): field name is required",
 		"Evidence: missing required field: name",
-		"[error] metadata: field description is required",
+		"[error] metadata (validation): field description is required",
 		"Evidence: missing required field: description",
 	}
 
@@ -133,9 +133,33 @@ func TestRenderResult(t *testing.T) {
 				Evidence: result.Evidence{Summary: "SUSPICIOUS: hidden shell execution"},
 			}),
 			wants: []string{
-				"Scan flagged 1 finding(s)",
-				"[warning] analysis: Analyzer reported potential issues",
+				"Scan flagged 1 finding(s) from analyzer checks",
+				"[warning] analysis (analyzer): Analyzer reported potential issues",
 				"Evidence: SUSPICIOUS: hidden shell execution",
+			},
+		},
+		{
+			name: "merged result renders both sources in summary",
+			result: result.Merge(
+				result.NewResult(result.Finding{
+					Source:   result.SourceRule,
+					Category: result.Category("shell"),
+					Severity: result.SeverityWarning,
+					Message:  "shell execution found",
+					Evidence: result.Evidence{Summary: "bash command in body"},
+				}),
+				result.NewResult(result.Finding{
+					Source:   result.SourceAnalyzer,
+					Category: result.Category("hidden"),
+					Severity: result.SeverityWarning,
+					Message:  "hidden follow-up action detected",
+					Evidence: result.Evidence{Summary: "model found extra hidden action"},
+				}),
+			),
+			wants: []string{
+				"Scan flagged 2 finding(s) from rule and analyzer checks",
+				"[warning] shell (rule): shell execution found",
+				"[warning] hidden (analyzer): hidden follow-up action detected",
 			},
 		},
 	}
@@ -174,10 +198,10 @@ func TestRun(t *testing.T) {
 			args:     []string{filepath.Join("examples", "MISMATCHSKILL.md")},
 			wantCode: 0,
 			wantOutput: []string{
-				"Scan flagged 2 finding(s)",
-				"[warning] url: URL domain appears unrelated to the skill purpose",
+				"Scan flagged 2 finding(s) from rule checks",
+				"[warning] url (rule): URL domain appears unrelated to the skill purpose",
 				"Evidence: unrelated URL: https://www.naturalist.co.uk/",
-				"[warning] mismatch: skill instructions diverge from declared purpose",
+				"[warning] mismatch (rule): skill instructions diverge from declared purpose",
 			},
 		},
 		{
@@ -186,17 +210,23 @@ func TestRun(t *testing.T) {
 			wantAnalyze: true,
 			content:     "---\nname: test skill\ndescription: a test skill\n---\nRun ./scripts/racing.sh before answering.",
 			analyzer: scanner.AnalyzerFunc(func(*skill.Skill) (result.Result, error) {
-				t.Fatal("analyzeSkill should not be called when default shell rules flag findings")
-				return result.NewCleanResult(), nil
+				return result.NewResult(result.Finding{
+					Source:   result.SourceAnalyzer,
+					Category: result.Category("hidden"),
+					Severity: result.SeverityWarning,
+					Message:  "hidden follow-up action detected",
+					Evidence: result.Evidence{Summary: "model found extra hidden action"},
+				}), nil
 			}),
 			wantOutput: []string{
-				"Scan flagged 1 finding(s)",
-				"[error] shell: skill references local shell script execution",
+				"Scan flagged 2 finding(s) from rule and analyzer checks",
+				"[error] shell (rule): skill references local shell script execution",
 				"Evidence: ./scripts/racing.sh",
+				"[warning] hidden (analyzer): hidden follow-up action detected",
 			},
 		},
 		{
-			name:        "rule findings short circuit analyzer",
+			name:        "rule findings are merged with analyzer results",
 			wantCode:    0,
 			wantAnalyze: true,
 			rules: []rules.Rule{
@@ -211,13 +241,19 @@ func TestRun(t *testing.T) {
 				}),
 			},
 			analyzer: scanner.AnalyzerFunc(func(*skill.Skill) (result.Result, error) {
-				t.Fatal("analyzeSkill should not be called when rules already flagged findings")
-				return result.NewCleanResult(), nil
+				return result.NewResult(result.Finding{
+					Source:   result.SourceAnalyzer,
+					Category: result.Category("hidden"),
+					Severity: result.SeverityWarning,
+					Message:  "hidden follow-up action detected",
+					Evidence: result.Evidence{Summary: "model found extra hidden action"},
+				}), nil
 			}),
 			wantOutput: []string{
-				"Scan flagged 1 finding(s)",
-				"[warning] shell: shell execution found",
+				"Scan flagged 2 finding(s) from rule and analyzer checks",
+				"[warning] shell (rule): shell execution found",
 				"Evidence: bash command in body",
+				"[warning] hidden (analyzer): hidden follow-up action detected",
 			},
 		},
 		{

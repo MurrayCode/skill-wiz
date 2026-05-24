@@ -81,3 +81,112 @@ func TestNewResultWithoutFindingsReturnsCleanResult(t *testing.T) {
 		t.Fatalf("len(NewResult().Findings) = %d, want 0", len(got.Findings))
 	}
 }
+
+func TestMerge(t *testing.T) {
+	tests := []struct {
+		name        string
+		results     []Result
+		wantClean   bool
+		wantCount   int
+		wantSources []Source
+	}{
+		{
+			name: "clean inputs stay clean",
+			results: []Result{
+				NewCleanResult(),
+				NewCleanResult(),
+			},
+			wantClean: true,
+			wantCount: 0,
+		},
+		{
+			name: "distinct rule and analyzer findings are combined in order",
+			results: []Result{
+				NewResult(Finding{
+					Source:   SourceRule,
+					Category: Category("shell"),
+					Severity: SeverityError,
+					Message:  "skill references local shell script execution",
+					Evidence: Evidence{Summary: "./scripts/deploy.sh"},
+				}),
+				NewResult(Finding{
+					Source:   SourceAnalyzer,
+					Category: Category("hidden"),
+					Severity: SeverityWarning,
+					Message:  "Skill hides an extra step",
+					Evidence: Evidence{Summary: "model found hidden execution step"},
+				}),
+			},
+			wantClean:   false,
+			wantCount:   2,
+			wantSources: []Source{SourceRule, SourceAnalyzer},
+		},
+		{
+			name: "overlapping findings are de-duplicated across sources",
+			results: []Result{
+				NewResult(Finding{
+					Source:   SourceRule,
+					Category: Category("shell"),
+					Severity: SeverityWarning,
+					Message:  "skill references shell execution",
+					Evidence: Evidence{Summary: "bash -lc 'ls'"},
+				}),
+				NewResult(Finding{
+					Source:   SourceAnalyzer,
+					Category: Category("shell"),
+					Severity: SeverityWarning,
+					Message:  "skill references shell execution",
+					Evidence: Evidence{Summary: "bash -lc 'ls'"},
+				}),
+			},
+			wantClean:   false,
+			wantCount:   1,
+			wantSources: []Source{SourceRule},
+		},
+		{
+			name: "same category with different evidence is preserved",
+			results: []Result{
+				NewResult(Finding{
+					Source:   SourceRule,
+					Category: Category("mismatch"),
+					Severity: SeverityWarning,
+					Message:  "skill instructions diverge from declared purpose",
+					Evidence: Evidence{Summary: "description conflicts with body section"},
+				}),
+				NewResult(Finding{
+					Source:   SourceAnalyzer,
+					Category: Category("mismatch"),
+					Severity: SeverityWarning,
+					Message:  "description and body appear inconsistent",
+					Evidence: Evidence{Summary: "model noticed different operational intent"},
+				}),
+			},
+			wantClean:   false,
+			wantCount:   2,
+			wantSources: []Source{SourceRule, SourceAnalyzer},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := Merge(tt.results...)
+
+			if got.Clean() != tt.wantClean {
+				t.Fatalf("Merge().Clean() = %v, want %v", got.Clean(), tt.wantClean)
+			}
+			if len(got.Findings) != tt.wantCount {
+				t.Fatalf("len(Merge().Findings) = %d, want %d", len(got.Findings), tt.wantCount)
+			}
+
+			sources := got.Sources()
+			if len(sources) != len(tt.wantSources) {
+				t.Fatalf("len(Merge().Sources()) = %d, want %d", len(sources), len(tt.wantSources))
+			}
+			for i, want := range tt.wantSources {
+				if sources[i] != want {
+					t.Fatalf("Merge().Sources()[%d] = %q, want %q", i, sources[i], want)
+				}
+			}
+		})
+	}
+}

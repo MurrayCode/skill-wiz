@@ -28,13 +28,19 @@ func (s Scanner) Scan(skillFile *skill.Skill) (result.Result, error) {
 		return result.Result{}, fmt.Errorf("scan skill: nil skill")
 	}
 
-	if ruleResult := rules.Scan(skillFile, s.Rules...); !ruleResult.Clean() {
+	ruleResult := rules.Scan(skillFile, s.Rules...)
+
+	if s.Analyzer == nil {
 		return ruleResult, nil
 	}
 
-	if s.Analyzer == nil {
-		return result.NewCleanResult(), nil
+	analyzerResult, err := s.Analyzer.Analyze(skillFile)
+	if err != nil {
+		if !ruleResult.Clean() {
+			return ruleResult, nil
+		}
+		return result.Result{}, err
 	}
 
-	return s.Analyzer.Analyze(skillFile)
+	return result.Merge(ruleResult, analyzerResult), nil
 }

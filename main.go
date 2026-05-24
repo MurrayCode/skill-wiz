@@ -57,15 +57,37 @@ func renderResult(scanResult result.Result) string {
 	}
 
 	var builder strings.Builder
-	fmt.Fprintf(&builder, "Scan flagged %d finding(s)\n", len(scanResult.Findings))
+	fmt.Fprintf(&builder, "Scan flagged %d finding(s)", len(scanResult.Findings))
+	if sources := scanResult.Sources(); len(sources) > 0 {
+		fmt.Fprintf(&builder, " from %s checks", formatSources(sources))
+	}
+	builder.WriteString("\n")
 	for _, finding := range scanResult.Findings {
-		fmt.Fprintf(&builder, "[%s] %s: %s\n", finding.Severity, finding.Category, finding.Message)
+		fmt.Fprintf(&builder, "[%s] %s (%s): %s\n", finding.Severity, finding.Category, finding.Source, finding.Message)
 		if finding.Evidence.Summary != "" {
 			fmt.Fprintf(&builder, "Evidence: %s\n", finding.Evidence.Summary)
 		}
 	}
 
 	return builder.String()
+}
+
+func formatSources(sources []result.Source) string {
+	parts := make([]string, 0, len(sources))
+	for _, source := range sources {
+		parts = append(parts, string(source))
+	}
+
+	switch len(parts) {
+	case 0:
+		return ""
+	case 1:
+		return parts[0]
+	case 2:
+		return parts[0] + " and " + parts[1]
+	default:
+		return strings.Join(parts[:len(parts)-1], ", ") + ", and " + parts[len(parts)-1]
+	}
 }
 
 func analyseCleanMessage() string {
