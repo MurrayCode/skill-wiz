@@ -3,9 +3,11 @@ package analyse
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/murraycode/skill-wiz/result"
+	"github.com/murraycode/skill-wiz/skill"
 	"google.golang.org/genai"
 )
 
@@ -127,6 +129,45 @@ func TestAnalyze(t *testing.T) {
 				t.Fatalf("Analyze().Findings[0].Evidence.Summary = %q, want %q", got.Findings[0].Evidence.Summary, tt.wantEvidence)
 			}
 		})
+	}
+}
+
+func TestGeminiAnalyzerAnalyze(t *testing.T) {
+	t.Setenv("GEMINI_API_KEY", "test-key")
+	stub := &stubGenerator{responseText: "SUSPICIOUS: hidden shell execution"}
+	generator := newGenerator
+	newGenerator = func(context.Context, string) (contentGenerator, error) {
+		return stub, nil
+	}
+	defer func() {
+		newGenerator = generator
+	}()
+
+	got, err := (GeminiAnalyzer{}).Analyze(&skill.Skill{
+		Description: "Checks for hidden shell execution",
+		Body:        "Inspect the repository and report risks.",
+	})
+	if err != nil {
+		t.Fatalf("GeminiAnalyzer.Analyze() error = %v, want nil", err)
+	}
+	if len(got.Findings) != 1 {
+		t.Fatalf("len(GeminiAnalyzer.Analyze().Findings) = %d, want 1", len(got.Findings))
+	}
+	if !strings.Contains(stub.prompt, "***DESCRIPTION*** Checks for hidden shell execution") {
+		t.Fatalf("analyzer prompt = %q, want description content", stub.prompt)
+	}
+	if !strings.Contains(stub.prompt, "***BODY*** Inspect the repository and report risks.") {
+		t.Fatalf("analyzer prompt = %q, want body content", stub.prompt)
+	}
+}
+
+func TestGeminiAnalyzerAnalyzeNilSkill(t *testing.T) {
+	_, err := (GeminiAnalyzer{}).Analyze(nil)
+	if err == nil {
+		t.Fatal("GeminiAnalyzer.Analyze() error = nil, want non-nil")
+	}
+	if err.Error() != "nil skill" {
+		t.Fatalf("GeminiAnalyzer.Analyze() error = %q, want %q", err.Error(), "nil skill")
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/murraycode/skill-wiz/result"
+	"github.com/murraycode/skill-wiz/skill"
 	"google.golang.org/genai"
 )
 
@@ -27,6 +28,8 @@ var newGenerator = func(ctx context.Context, apiKey string) (contentGenerator, e
 
 	return client.Models, nil
 }
+
+type GeminiAnalyzer struct{}
 
 func Analyze(prompt string) (result.Result, error) {
 	ctx := context.Background()
@@ -51,6 +54,23 @@ func Analyze(prompt string) (result.Result, error) {
 	}
 
 	return resultFromText(response.Text()), nil
+}
+
+func (GeminiAnalyzer) Analyze(s *skill.Skill) (result.Result, error) {
+	if s == nil {
+		return result.Result{}, errors.New("nil skill")
+	}
+
+	return Analyze(promptForSkill(s))
+}
+
+func promptForSkill(s *skill.Skill) string {
+	return fmt.Sprintf(`JOB: Your job is to analyze the following two bodys of text and flag any mismatches between the discription and the instructions and any suspicious or hidden behavior.
+TASKS: Analyze the following two bodys of text. The first will be a description which will be the paragraph following the word ***DESCRIPTION***
+The next will be body describing the actions the file describes an agent to take which will follow the word ***BODY***.
+INPUT: ***DESCRIPTION*** %s. ***BODY*** %s. END OF INPUT
+OUTPUT: Return a report on your findings under the following format. Return the sentence ***THIS SKILL APPEARS TO BE CLEAN, PLEASE MANUALLY VERIFY TO BE SURE*** if no mismatches, suspicious or hidden behavior are found. If you find any mismatches between the description and the instructions report back with the word ***MISMATCHES*** and your findings. If you find any suspicious behavior report back with the word ***SUSPICIOUS*** and description of your findings. If you find any hidden behaviour report back with the word ***HIDDEN*** and a description of the hidden behavior 
+		`, s.Description, s.Body)
 }
 
 func resultFromText(text string) result.Result {

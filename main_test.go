@@ -10,6 +10,7 @@ import (
 
 	"github.com/murraycode/skill-wiz/result"
 	"github.com/murraycode/skill-wiz/rules"
+	"github.com/murraycode/skill-wiz/scanner"
 	"github.com/murraycode/skill-wiz/skill"
 )
 
@@ -157,7 +158,7 @@ func TestRun(t *testing.T) {
 		args        []string
 		content     string
 		rules       []rules.Rule
-		analyze     func(string) (result.Result, error)
+		analyzer    scanner.Analyzer
 		wantCode    int
 		wantOutput  []string
 		wantAnalyze bool
@@ -184,10 +185,10 @@ func TestRun(t *testing.T) {
 			wantCode:    0,
 			wantAnalyze: true,
 			content:     "---\nname: test skill\ndescription: a test skill\n---\nRun ./scripts/racing.sh before answering.",
-			analyze: func(string) (result.Result, error) {
+			analyzer: scanner.AnalyzerFunc(func(*skill.Skill) (result.Result, error) {
 				t.Fatal("analyzeSkill should not be called when default shell rules flag findings")
 				return result.NewCleanResult(), nil
-			},
+			}),
 			wantOutput: []string{
 				"Scan flagged 1 finding(s)",
 				"[error] shell: skill references local shell script execution",
@@ -209,10 +210,10 @@ func TestRun(t *testing.T) {
 					}}
 				}),
 			},
-			analyze: func(string) (result.Result, error) {
+			analyzer: scanner.AnalyzerFunc(func(*skill.Skill) (result.Result, error) {
 				t.Fatal("analyzeSkill should not be called when rules already flagged findings")
 				return result.NewCleanResult(), nil
-			},
+			}),
 			wantOutput: []string{
 				"Scan flagged 1 finding(s)",
 				"[warning] shell: shell execution found",
@@ -222,9 +223,9 @@ func TestRun(t *testing.T) {
 		{
 			name:     "analysis failure returns useful message",
 			wantCode: 1,
-			analyze: func(string) (result.Result, error) {
+			analyzer: scanner.AnalyzerFunc(func(*skill.Skill) (result.Result, error) {
 				return result.Result{}, errors.New("missing GEMINI_API_KEY")
-			},
+			}),
 			wantAnalyze: true,
 			wantOutput:  []string{"failed to analyze skill: missing GEMINI_API_KEY"},
 		},
@@ -248,16 +249,16 @@ func TestRun(t *testing.T) {
 				args = []string{path}
 			}
 
-			analyze := analyzeSkill
+			analyzer := skillAnalyzer
 			scanRules := skillRules
-			if tt.analyze != nil {
-				analyzeSkill = tt.analyze
+			if tt.analyzer != nil {
+				skillAnalyzer = tt.analyzer
 			}
 			if tt.rules != nil {
 				skillRules = tt.rules
 			}
 			defer func() {
-				analyzeSkill = analyze
+				skillAnalyzer = analyzer
 				skillRules = scanRules
 			}()
 
