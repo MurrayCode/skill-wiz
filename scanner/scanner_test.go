@@ -72,9 +72,15 @@ func TestScanCallsInjectedAnalyzerWhenRulesAreClean(t *testing.T) {
 	}
 }
 
-func TestScanSkipsAnalyzerWhenRulesFlagFindings(t *testing.T) {
+func TestScanMergesRuleAndAnalyzerFindings(t *testing.T) {
 	s := &skill.Skill{Name: "test skill", Description: "a test skill", Body: "body"}
-	analyzer := &stubAnalyzer{result: result.NewCleanResult()}
+	analyzer := &stubAnalyzer{result: result.NewResult(result.Finding{
+		Source:   result.SourceAnalyzer,
+		Category: result.Category("hidden"),
+		Severity: result.SeverityWarning,
+		Message:  "hidden follow-up action detected",
+		Evidence: result.Evidence{Summary: "model found extra hidden action"},
+	})}
 	scanner := Scanner{
 		Rules: []rules.Rule{
 			rules.RuleFunc(func(*skill.Skill) []result.Finding {
@@ -93,11 +99,62 @@ func TestScanSkipsAnalyzerWhenRulesFlagFindings(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Scan() error = %v, want nil", err)
 	}
-	if analyzer.called {
-		t.Fatal("Scan() called analyzer after rule findings")
+	if !analyzer.called {
+		t.Fatal("Scan() did not call analyzer after rule findings")
+	}
+	if len(got.Findings) != 2 {
+		t.Fatalf("len(Scan().Findings) = %d, want 2", len(got.Findings))
+	}
+	if got.Findings[0].Source != result.SourceRule {
+		t.Fatalf("Scan().Findings[0].Source = %q, want %q", got.Findings[0].Source, result.SourceRule)
+	}
+	if got.Findings[1].Source != result.SourceAnalyzer {
+		t.Fatalf("Scan().Findings[1].Source = %q, want %q", got.Findings[1].Source, result.SourceAnalyzer)
+	}
+	if got.Findings[1].Message != "hidden follow-up action detected" {
+		t.Fatalf("Scan().Findings[1].Message = %q, want %q", got.Findings[1].Message, "hidden follow-up action detected")
+	}
+	if len(got.Sources()) != 2 {
+		t.Fatalf("len(Scan().Sources()) = %d, want 2", len(got.Sources()))
+	}
+}
+
+func TestScanDeDuplicatesOverlappingRuleAndAnalyzerFindings(t *testing.T) {
+	s := &skill.Skill{Name: "test skill", Description: "a test skill", Body: "body"}
+	analyzer := &stubAnalyzer{result: result.NewResult(result.Finding{
+		Source:   result.SourceAnalyzer,
+		Category: result.Category("shell"),
+		Severity: result.SeverityWarning,
+		Message:  "shell execution found",
+		Evidence: result.Evidence{Summary: "bash command in body"},
+	})}
+	scanner := Scanner{
+		Rules: []rules.Rule{
+			rules.RuleFunc(func(*skill.Skill) []result.Finding {
+				return []result.Finding{{
+					Source:   result.SourceRule,
+					Category: result.Category("shell"),
+					Severity: result.SeverityWarning,
+					Message:  "shell execution found",
+					Evidence: result.Evidence{Summary: "bash command in body"},
+				}}
+			}),
+		},
+		Analyzer: analyzer,
+	}
+
+	got, err := scanner.Scan(s)
+	if err != nil {
+		t.Fatalf("Scan() error = %v, want nil", err)
+	}
+	if !analyzer.called {
+		t.Fatal("Scan() did not call analyzer")
 	}
 	if len(got.Findings) != 1 {
 		t.Fatalf("len(Scan().Findings) = %d, want 1", len(got.Findings))
+	}
+	if got.Findings[0].Source != result.SourceRule {
+		t.Fatalf("Scan().Findings[0].Source = %q, want %q", got.Findings[0].Source, result.SourceRule)
 	}
 }
 
@@ -120,5 +177,38 @@ func TestScanReturnsAnalyzerError(t *testing.T) {
 	}
 	if !analyzer.called {
 		t.Fatal("Scan() did not call injected analyzer")
+	}
+}
+
+func TestScanReturnsRuleFindingsWhenAnalyzerFailsAfterRulesFlagged(t *testing.T) {
+	s := &skill.Skill{Name: "test skill", Description: "a test skill", Body: "body"}
+	analyzer := &stubAnalyzer{err: errors.New("missing GEMINI_API_KEY")}
+	scanner := Scanner{
+		Rules: []rules.Rule{
+			rules.RuleFunc(func(*skill.Skill) []result.Finding {
+				return []result.Finding{{
+					Source:   result.SourceRule,
+					Category: result.Category("shell"),
+					Severity: result.SeverityWarning,
+					Message:  "shell execution found",
+					Evidence: result.Evidence{Summary: "bash command in body"},
+				}}
+			}),
+		},
+		Analyzer: analyzer,
+	}
+
+	got, err := scanner.Scan(s)
+	if err != nil {
+		t.Fatalf("Scan() error = %v, want nil", err)
+	}
+	if !analyzer.called {
+		t.Fatal("Scan() did not call injected analyzer")
+	}
+	if len(got.Findings) != 1 {
+		t.Fatalf("len(Scan().Findings) = %d, want 1", len(got.Findings))
+	}
+	if got.Findings[0].Source != result.SourceRule {
+		t.Fatalf("Scan().Findings[0].Source = %q, want %q", got.Findings[0].Source, result.SourceRule)
 	}
 }
