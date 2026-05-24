@@ -7,11 +7,13 @@ import (
 	"strings"
 
 	"github.com/murraycode/skill-wiz/analyse"
+	"github.com/murraycode/skill-wiz/rules"
 	"github.com/murraycode/skill-wiz/result"
 	"github.com/murraycode/skill-wiz/skill"
 )
 
 var analyzeSkill = analyse.Analyze
+var skillRules = rules.Default()
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
@@ -36,6 +38,10 @@ func run(args []string, stdout io.Writer, stderr io.Writer) int {
 	}
 	if validationResult := validationResultForSkill(s); !validationResult.Clean() {
 		fmt.Fprint(stdout, renderResult(validationResult))
+		return 0
+	}
+	if ruleResult := rules.Scan(s, skillRules...); !ruleResult.Clean() {
+		fmt.Fprint(stdout, renderResult(ruleResult))
 		return 0
 	}
 	prompt := fmt.Sprintf(`JOB: Your job is to analyze the following two bodys of text and flag any mismatches between the discription and the instructions and any suspicious or hidden behavior.
