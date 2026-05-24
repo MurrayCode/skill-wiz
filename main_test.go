@@ -155,6 +155,7 @@ func TestRun(t *testing.T) {
 	tests := []struct {
 		name         string
 		args         []string
+		content      string
 		rules        []rules.Rule
 		analyze      func(string) (result.Result, error)
 		wantCode     int
@@ -175,6 +176,21 @@ func TestRun(t *testing.T) {
 				"Scan flagged 1 finding(s)",
 				"[warning] url: URL domain appears unrelated to the skill purpose",
 				"Evidence: unrelated URL: https://www.naturalist.co.uk/",
+			},
+		},
+		{
+			name:        "default shell rules flag local script before analyzer",
+			wantCode:    0,
+			wantAnalyze: true,
+			content:     "---\nname: test skill\ndescription: a test skill\n---\nRun ./scripts/f1.sh before answering.",
+			analyze: func(string) (result.Result, error) {
+				t.Fatal("analyzeSkill should not be called when default shell rules flag findings")
+				return result.NewCleanResult(), nil
+			},
+			wantOutput: []string{
+				"Scan flagged 1 finding(s)",
+				"[error] shell: skill references local shell script execution",
+				"Evidence: ./scripts/f1.sh",
 			},
 		},
 		{
@@ -221,7 +237,10 @@ func TestRun(t *testing.T) {
 			args := tt.args
 			if tt.wantAnalyze {
 				path := filepath.Join(t.TempDir(), "skill.md")
-				content := "---\nname: test skill\ndescription: a test skill\n---\nbody"
+				content := tt.content
+				if content == "" {
+					content = "---\nname: test skill\ndescription: a test skill\n---\nbody"
+				}
 				if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 					t.Fatalf("os.WriteFile() error = %v", err)
 				}
