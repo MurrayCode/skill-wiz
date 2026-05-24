@@ -168,6 +168,16 @@ func TestRun(t *testing.T) {
 			wantOutput: []string{"Please provide a path to a skill file"},
 		},
 		{
+			name:       "mismatch example is flagged by rules before analyzer",
+			args:       []string{filepath.Join("examples", "MISMATCHSKILL.md")},
+			wantCode:   0,
+			wantOutput: []string{
+				"Scan flagged 1 finding(s)",
+				"[warning] url: URL domain appears unrelated to the skill purpose",
+				"Evidence: unrelated URL: https://www.naturalist.co.uk/",
+			},
+		},
+		{
 			name: "rule findings short circuit analyzer",
 			wantCode: 0,
 			wantAnalyze: true,
