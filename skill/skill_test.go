@@ -1,6 +1,7 @@
 package skill
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -9,6 +10,7 @@ func TestParse(t *testing.T) {
 		name         string
 		content      string
 		wantErr      bool
+		wantErrMsg   string
 		wantName     string
 		wantBody     string
 		wantAudience string
@@ -81,13 +83,15 @@ This is the body.
 			content: `name: test skill
 ---
 body`,
-			wantErr: true,
+			wantErr:    true,
+			wantErrMsg: "invalid skill format: must start with ---",
 		},
 		{
 			name: "missing frontmatter end",
 			content: `---
 name: test skill`,
-			wantErr: true,
+			wantErr:    true,
+			wantErrMsg: "invalid skill format: missing closing ---",
 		},
 		{
 			name: "malformed frontmatter",
@@ -95,7 +99,8 @@ name: test skill`,
 name: [test skill
 ---
 body`,
-			wantErr: true,
+			wantErr:    true,
+			wantErrMsg: "failed to parse yaml:",
 		},
 		{
 			name: "empty body",
@@ -125,6 +130,9 @@ name: test skill
 			if (err != nil) != tt.wantErr {
 				t.Errorf("Parse() error = %v, wantErr %v", err, tt.wantErr)
 				return
+			}
+			if tt.wantErrMsg != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErrMsg)) {
+				t.Fatalf("Parse() error = %v, want substring %q", err, tt.wantErrMsg)
 			}
 			if !tt.wantErr {
 				if got.Name != tt.wantName {
@@ -164,6 +172,11 @@ func TestValidate(t *testing.T) {
 		{
 			name:         "multiple missing fields are reported",
 			skill:        Skill{},
+			wantMessages: []string{"field name is required", "field description is required"},
+		},
+		{
+			name:         "whitespace-only required fields are reported",
+			skill:        Skill{Name: " \t\n ", Description: "\r\n"},
 			wantMessages: []string{"field name is required", "field description is required"},
 		},
 	}

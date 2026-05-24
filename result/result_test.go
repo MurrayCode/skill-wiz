@@ -64,4 +64,20 @@ func TestNewResultPreservesFindings(t *testing.T) {
 			t.Fatalf("Result.Findings[%d] = %#v, want %#v", i, got.Findings[i], findings[i])
 		}
 	}
+
+	findings[0].Message = "changed after creation"
+	if got.Findings[0].Message == findings[0].Message {
+		t.Fatal("NewResult() did not protect stored findings from caller mutation")
+	}
+}
+
+func TestNewResultWithoutFindingsReturnsCleanResult(t *testing.T) {
+	got := NewResult()
+
+	if !got.Clean() {
+		t.Fatalf("NewResult().Clean() = %v, want true", got.Clean())
+	}
+	if len(got.Findings) != 0 {
+		t.Fatalf("len(NewResult().Findings) = %d, want 0", len(got.Findings))
+	}
 }
