@@ -35,6 +35,14 @@ func TestValidationResultForSkill(t *testing.T) {
 			wantMessages: []string{"field name is required", "field description is required"},
 			wantEvidence: []string{"missing required field: name", "missing required field: description"},
 		},
+		{
+			name:         "whitespace-only required fields produce validation findings",
+			skill:        skill.Skill{Name: "\t", Description: "  \n"},
+			wantClean:    false,
+			wantFindings: 2,
+			wantMessages: []string{"field name is required", "field description is required"},
+			wantEvidence: []string{"missing required field: name", "missing required field: description"},
+		},
 	}
 
 	for _, tt := range tests {
