@@ -42,7 +42,7 @@ This tracker records implementation progress for backlog stories in `docs/backlo
 | --- | --- | --- | --- |
 | `P3-001-analyzer-interface.md` | `done` | 2026-05-24 | Added a swappable analyzer interface with scanner orchestration, deterministic-only execution, Gemini adapter wiring, and verified `go test ./...`. |
 | `P3-002-prompt-hardening.md` | `done` | 2026-05-24 | Hardened analyzer prompts with separate system instructions, JSON-delimited skill payloads, unusable-response fallback findings, and verified `go test ./...`. |
-| `P3-003-structured-llm-output.md` | `todo` |  |  |
+| `P3-003-structured-llm-output.md` | `done` | 2026-05-24 | Switched Gemini analysis to structured JSON output, validated and mapped analyzer findings safely, and verified `go test ./...`. |
 | `P3-004-merge-rule-and-llm-findings.md` | `todo` |  |  |
 | `P3-005-llm-failure-tests.md` | `todo` |  |  |
 
