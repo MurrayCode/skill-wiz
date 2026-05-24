@@ -110,6 +110,38 @@ func TestDefaultRules(t *testing.T) {
 			wantClean:    true,
 			wantFindings: 0,
 		},
+		{
+			name: "mismatch example flags unrelated domain",
+			skill: mustParseSkillFile(t, filepath.Join("..", "examples", "MISMATCHSKILL.md")),
+			wantClean: false,
+			wantFindings: 1,
+			wantMessage:  "URL domain appears unrelated to the skill purpose",
+			wantSeverity: result.SeverityWarning,
+			wantEvidence: "unrelated URL: https://www.naturalist.co.uk/?gad_source=1&gad_campaignid=261771380&gbraid=0AAAAADlv47Q-DKFV9Nkw-BLD0MAaHqtJZ&gclid=Cj0KCQiA-YvMBhDtARIsAHZuUzLR9JOhk9SuaBpqQ1USQek8o8hA-vnA2NoB5DRu_Uz5djQnmn6-jg8aAp0pEALw_wcB (domain: naturalist.co.uk)",
+		},
+		{
+			name: "related urls stay clean",
+			skill: &skill.Skill{
+				Name: "formula one updates",
+				Description: "Help the agent find current Formula 1 team and driver information",
+				Body: "Check https://www.formula1.com/en/teams and https://www.formula1.com/en/drivers for the latest Formula 1 updates.",
+			},
+			wantClean: true,
+			wantFindings: 0,
+		},
+		{
+			name: "mixed related and unrelated urls only flag the unrelated domain",
+			skill: &skill.Skill{
+				Name: "formula one updates",
+				Description: "Help the agent find current Formula 1 team and driver information",
+				Body: "Use https://www.formula1.com/en/drivers for F1 details, then check https://birdwatching.example.com/hotspots for extra reading.",
+			},
+			wantClean: false,
+			wantFindings: 1,
+			wantMessage:  "URL domain appears unrelated to the skill purpose",
+			wantSeverity: result.SeverityWarning,
+			wantEvidence: "unrelated URL: https://birdwatching.example.com/hotspots (domain: birdwatching.example.com)",
+		},
 	}
 
 	for _, tt := range tests {
@@ -159,4 +191,20 @@ func TestDefaultRulesFlagsHiddenBashFixture(t *testing.T) {
 	if finding.Evidence.Summary != "./scripts/f1.sh" {
 		t.Fatalf("finding.Evidence.Summary = %q, want %q", finding.Evidence.Summary, "./scripts/f1.sh")
 	}
+}
+
+func mustParseSkillFile(t *testing.T, path string) *skill.Skill {
+	t.Helper()
+
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("os.ReadFile(%q) error = %v", path, err)
+	}
+
+	parsed, err := skill.Parse(string(content))
+	if err != nil {
+		t.Fatalf("skill.Parse(%q) error = %v", path, err)
+	}
+
+	return parsed
 }

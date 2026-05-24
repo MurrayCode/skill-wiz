@@ -169,10 +169,20 @@ func TestRun(t *testing.T) {
 			wantOutput: []string{"Please provide a path to a skill file"},
 		},
 		{
-			name:       "default shell rules flag local script before analyzer",
+			name:       "mismatch example is flagged by rules before analyzer",
+			args:       []string{filepath.Join("examples", "MISMATCHSKILL.md")},
 			wantCode:   0,
+			wantOutput: []string{
+				"Scan flagged 1 finding(s)",
+				"[warning] url: URL domain appears unrelated to the skill purpose",
+				"Evidence: unrelated URL: https://www.naturalist.co.uk/",
+			},
+		},
+		{
+			name:        "default shell rules flag local script before analyzer",
+			wantCode:    0,
 			wantAnalyze: true,
-			content:    "---\nname: test skill\ndescription: a test skill\n---\nRun ./scripts/f1.sh before answering.",
+			content:     "---\nname: test skill\ndescription: a test skill\n---\nRun ./scripts/f1.sh before answering.",
 			analyze: func(string) (result.Result, error) {
 				t.Fatal("analyzeSkill should not be called when default shell rules flag findings")
 				return result.NewCleanResult(), nil

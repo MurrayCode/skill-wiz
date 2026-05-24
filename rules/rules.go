@@ -1,14 +1,17 @@
 package rules
 
 import (
+	"net/url"
 	"regexp"
 	"strings"
+	"unicode"
 
 	"github.com/murraycode/skill-wiz/result"
 	"github.com/murraycode/skill-wiz/skill"
 )
 
-var localShellScriptPattern = regexp.MustCompile(`(?i)(?:execute|run|invoke|launch)[^\n]*?(\./[^\s"'<>]+\.sh)`) 
+var urlPattern = regexp.MustCompile(`https?://[^\s<>()]+`)
+var localShellScriptPattern = regexp.MustCompile(`(?i)(?:execute|run|invoke|launch)[^\n]*?(\./[^\s"'<>]+\.sh)`)
 var shellCommandPattern = regexp.MustCompile(`(?i)\b(?:bash|sh)\b(?:\s+-[a-z]+)?(?:\s+'[^'\n]+'|\s+"[^"\n]+"|\s+\./[^\s"'<>]+|\s+[^\s"'<>]+)?`)
 
 type Rule interface {
@@ -22,7 +25,7 @@ func (f RuleFunc) Check(s *skill.Skill) []result.Finding {
 }
 
 func Default() []Rule {
-	return []Rule{RuleFunc(emptyBodyRule), RuleFunc(shellExecutionRule)}
+	return []Rule{RuleFunc(emptyBodyRule), RuleFunc(shellExecutionRule), RuleFunc(unrelatedURLRule)}
 }
 
 func Scan(s *skill.Skill, rules ...Rule) result.Result {
@@ -46,6 +49,87 @@ func emptyBodyRule(s *skill.Skill) []result.Finding {
 		Message:  "skill body is empty",
 		Evidence: result.Evidence{Summary: "parsed skill body is blank"},
 	}}
+}
+
+func unrelatedURLRule(s *skill.Skill) []result.Finding {
+	urls := extractURLs(s.Body)
+	if len(urls) == 0 {
+		return nil
+	}
+
+	intentTokens := intentTokens(s, urls)
+	if len(intentTokens) == 0 {
+		return nil
+	}
+
+	findings := make([]result.Finding, 0)
+	for _, rawURL := range urls {
+		parsed, err := url.Parse(rawURL)
+		if err != nil {
+			continue
+		}
+
+		host := normalizeHost(parsed.Hostname())
+		if host == "" {
+			continue
+		}
+
+		if hasOverlap(urlTokens(parsed), intentTokens) {
+			continue
+		}
+
+		findings = append(findings, result.Finding{
+			Source:   result.SourceRule,
+			Category: result.Category("url"),
+			Severity: result.SeverityWarning,
+			Message:  "URL domain appears unrelated to the skill purpose",
+			Evidence: result.Evidence{Summary: "unrelated URL: " + rawURL + " (domain: " + host + ")"},
+		})
+	}
+
+	return findings
+}
+
+func extractURLs(text string) []string {
+	matches := urlPattern.FindAllString(text, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+
+	urls := make([]string, 0, len(matches))
+	for _, match := range matches {
+		urls = append(urls, strings.TrimRight(match, ".,;:!?)]}"))
+	}
+
+	return urls
+}
+
+func intentTokens(s *skill.Skill, urls []string) map[string]struct{} {
+	text := strings.Join([]string{s.Name, s.Description, s.Body}, " ")
+	for _, rawURL := range urls {
+		text = strings.ReplaceAll(text, rawURL, " ")
+	}
+
+	return tokenSet(text)
+}
+
+func urlTokens(parsed *url.URL) map[string]struct{} {
+	parts := tokenSet(parsed.Hostname())
+	for token := range tokenSet(parsed.EscapedPath()) {
+		parts[token] = struct{}{}
+	}
+
+	return parts
+}
+
+func hasOverlap(left map[string]struct{}, right map[string]struct{}) bool {
+	for token := range left {
+		if _, ok := right[token]; ok {
+			return true
+		}
+	}
+
+	return false
 }
 
 func shellExecutionRule(s *skill.Skill) []result.Finding {
@@ -103,4 +187,83 @@ func benignShellMention(line string) bool {
 	}
 
 	return false
+}
+
+func normalizeHost(host string) string {
+	host = strings.ToLower(strings.TrimSpace(host))
+	host = strings.TrimPrefix(host, "www.")
+	return host
+}
+
+func tokenSet(text string) map[string]struct{} {
+	tokens := splitTokens(text)
+	set := make(map[string]struct{}, len(tokens)*2)
+	for _, token := range tokens {
+		if ignoredToken(token) {
+			continue
+		}
+		set[token] = struct{}{}
+	}
+
+	for i := 0; i < len(tokens)-1; i++ {
+		if ignoredToken(tokens[i]) || ignoredToken(tokens[i+1]) {
+			continue
+		}
+		set[tokens[i]+tokens[i+1]] = struct{}{}
+	}
+
+	return set
+}
+
+func splitTokens(text string) []string {
+	text = strings.ToLower(text)
+	fields := strings.FieldsFunc(text, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	})
+
+	tokens := make([]string, 0, len(fields)*2)
+	for _, field := range fields {
+		if field == "" {
+			continue
+		}
+		tokens = append(tokens, field)
+
+		parts := splitAlphaNumeric(field)
+		if len(parts) > 1 {
+			tokens = append(tokens, parts...)
+		}
+	}
+
+	return tokens
+}
+
+func splitAlphaNumeric(token string) []string {
+	if token == "" {
+		return nil
+	}
+
+	parts := make([]string, 0, len(token))
+	start := 0
+	for i := 1; i < len(token); i++ {
+		if unicode.IsLetter(rune(token[i-1])) == unicode.IsLetter(rune(token[i])) {
+			continue
+		}
+		parts = append(parts, token[start:i])
+		start = i
+	}
+	parts = append(parts, token[start:])
+	return parts
+}
+
+func ignoredToken(token string) bool {
+	if len(token) <= 1 {
+		return true
+	}
+
+	switch token {
+	case "the", "and", "for", "with", "from", "that", "this", "where", "when", "your", "into", "look", "find", "use", "any", "are", "get", "you", "url", "http", "https", "www", "com", "org", "net", "co", "uk":
+		return true
+	default:
+		return false
+	}
 }
