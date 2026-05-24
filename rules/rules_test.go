@@ -1,6 +1,8 @@
 package rules
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/murraycode/skill-wiz/result"
@@ -72,6 +74,7 @@ func TestDefaultRules(t *testing.T) {
 		wantClean    bool
 		wantFindings int
 		wantMessages []string
+		wantSeverity []result.Severity
 		wantEvidence []string
 	}{
 		{
@@ -80,6 +83,7 @@ func TestDefaultRules(t *testing.T) {
 			wantClean:    false,
 			wantFindings: 1,
 			wantMessages: []string{"skill body is empty"},
+			wantSeverity: []result.Severity{result.SeverityWarning},
 			wantEvidence: []string{"parsed skill body is blank"},
 		},
 		{
@@ -88,11 +92,30 @@ func TestDefaultRules(t *testing.T) {
 			wantClean:    false,
 			wantFindings: 1,
 			wantMessages: []string{"skill instructions diverge from declared purpose"},
+			wantSeverity: []result.Severity{result.SeverityWarning},
 			wantEvidence: []string{"description keywords [agent formula information provides] conflict with instruction section [advice bird detailed give holiday rare seabirds watching]"},
 		},
 		{
-			name:         "non blank body is clean",
-			skill:        &skill.Skill{Name: "test skill", Description: "desc", Body: "do something useful"},
+			name:         "generic bash reference is flagged as warning",
+			skill:        &skill.Skill{Name: "test skill", Description: "desc", Body: "Run bash -lc 'ls' to inspect the repo."},
+			wantClean:    false,
+			wantFindings: 1,
+			wantMessages: []string{"skill references shell execution"},
+			wantSeverity: []result.Severity{result.SeverityWarning},
+			wantEvidence: []string{"bash -lc 'ls'"},
+		},
+		{
+			name:         "local shell script execution is flagged as error",
+			skill:        &skill.Skill{Name: "test skill", Description: "desc", Body: "Execute the local helper with ./scripts/deploy.sh before answering."},
+			wantClean:    false,
+			wantFindings: 1,
+			wantMessages: []string{"skill references local shell script execution"},
+			wantSeverity: []result.Severity{result.SeverityError},
+			wantEvidence: []string{"./scripts/deploy.sh"},
+		},
+		{
+			name:         "benign shell mention remains clean",
+			skill:        &skill.Skill{Name: "test skill", Description: "desc", Body: "Explain what a Unix shell is and when to use one."},
 			wantClean:    true,
 			wantFindings: 0,
 		},
@@ -102,27 +125,107 @@ func TestDefaultRules(t *testing.T) {
 			wantClean:    true,
 			wantFindings: 0,
 		},
+		{
+			name:         "mismatch example flags unrelated domain",
+			skill:        mustParseSkillFile(t, filepath.Join("..", "examples", "MISMATCHSKILL.md")),
+			wantClean:    false,
+			wantFindings: 1,
+			wantMessages: []string{"URL domain appears unrelated to the skill purpose"},
+			wantSeverity: []result.Severity{result.SeverityWarning},
+			wantEvidence: []string{
+				"unrelated URL: https://www.naturalist.co.uk/?gad_source=1&gad_campaignid=261771380&gbraid=0AAAAADlv47Q-DKFV9Nkw-BLD0MAaHqtJZ&gclid=Cj0KCQiA-YvMBhDtARIsAHZuUzLR9JOhk9SuaBpqQ1USQek8o8hA-vnA2NoB5DRu_Uz5djQnmn6-jg8aAp0pEALw_wcB (domain: naturalist.co.uk)",
+			},
+		},
+		{
+			name: "related urls stay clean",
+			skill: &skill.Skill{
+				Name:        "formula one updates",
+				Description: "Help the agent find current Formula 1 team and driver information",
+				Body:        "Check https://www.formula1.com/en/teams and https://www.formula1.com/en/drivers for the latest Formula 1 updates.",
+			},
+			wantClean:    true,
+			wantFindings: 0,
+		},
+		{
+			name: "mixed related and unrelated urls only flag the unrelated domain",
+			skill: &skill.Skill{
+				Name:        "formula one updates",
+				Description: "Help the agent find current Formula 1 team and driver information",
+				Body:        "Use https://www.formula1.com/en/drivers for F1 details, then check https://birdwatching.example.com/hotspots for extra reading.",
+			},
+			wantClean:    false,
+			wantFindings: 1,
+			wantMessages: []string{"URL domain appears unrelated to the skill purpose"},
+			wantSeverity: []result.Severity{result.SeverityWarning},
+			wantEvidence: []string{"unrelated URL: https://birdwatching.example.com/hotspots (domain: birdwatching.example.com)"},
+		},
 	}
 
 	for _, tt := range tests {
-			t.Run(tt.name, func(t *testing.T) {
-				got := Scan(tt.skill, Default()...)
+		t.Run(tt.name, func(t *testing.T) {
+			got := Scan(tt.skill, Default()...)
 
 			if got.Clean() != tt.wantClean {
 				t.Fatalf("Scan(Default()).Clean() = %v, want %v", got.Clean(), tt.wantClean)
 			}
-				if len(got.Findings) != tt.wantFindings {
-					t.Fatalf("len(Scan(Default()).Findings) = %d, want %d", len(got.Findings), tt.wantFindings)
-				}
+			if len(got.Findings) != tt.wantFindings {
+				t.Fatalf("len(Scan(Default()).Findings) = %d, want %d", len(got.Findings), tt.wantFindings)
+			}
 
-				for i, want := range tt.wantMessages {
-					if got.Findings[i].Message != want {
-						t.Fatalf("Scan(Default()).Findings[%d].Message = %q, want %q", i, got.Findings[i].Message, want)
-					}
-					if got.Findings[i].Evidence.Summary != tt.wantEvidence[i] {
-						t.Fatalf("Scan(Default()).Findings[%d].Evidence.Summary = %q, want %q", i, got.Findings[i].Evidence.Summary, tt.wantEvidence[i])
-					}
+			for i, want := range tt.wantMessages {
+				if got.Findings[i].Message != want {
+					t.Fatalf("Scan(Default()).Findings[%d].Message = %q, want %q", i, got.Findings[i].Message, want)
 				}
-			})
-		}
+				if got.Findings[i].Severity != tt.wantSeverity[i] {
+					t.Fatalf("Scan(Default()).Findings[%d].Severity = %q, want %q", i, got.Findings[i].Severity, tt.wantSeverity[i])
+				}
+				if got.Findings[i].Evidence.Summary != tt.wantEvidence[i] {
+					t.Fatalf("Scan(Default()).Findings[%d].Evidence.Summary = %q, want %q", i, got.Findings[i].Evidence.Summary, tt.wantEvidence[i])
+				}
+			}
+		})
+	}
+
+}
+
+func TestDefaultRulesFlagsHiddenBashFixture(t *testing.T) {
+	path := filepath.Join("..", "examples", "HIDDENBASHSKILL.md")
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("os.ReadFile(%q) error = %v", path, err)
+	}
+
+	s, err := skill.Parse(string(content))
+	if err != nil {
+		t.Fatalf("skill.Parse() error = %v", err)
+	}
+
+	got := Scan(s, Default()...)
+	if got.Clean() {
+		t.Fatal("Scan(Default()).Clean() = true, want false")
+	}
+
+	finding := got.Findings[0]
+	if finding.Message != "skill references local shell script execution" {
+		t.Fatalf("finding.Message = %q, want %q", finding.Message, "skill references local shell script execution")
+	}
+	if finding.Evidence.Summary != "./scripts/f1.sh" {
+		t.Fatalf("finding.Evidence.Summary = %q, want %q", finding.Evidence.Summary, "./scripts/f1.sh")
+	}
+}
+
+func mustParseSkillFile(t *testing.T, path string) *skill.Skill {
+	t.Helper()
+
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("os.ReadFile(%q) error = %v", path, err)
+	}
+
+	parsed, err := skill.Parse(string(content))
+	if err != nil {
+		t.Fatalf("skill.Parse(%q) error = %v", path, err)
+	}
+
+	return parsed
 }

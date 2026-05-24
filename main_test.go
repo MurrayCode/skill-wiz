@@ -8,19 +8,19 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/murraycode/skill-wiz/rules"
 	"github.com/murraycode/skill-wiz/result"
+	"github.com/murraycode/skill-wiz/rules"
 	"github.com/murraycode/skill-wiz/skill"
 )
 
 func TestValidationResultForSkill(t *testing.T) {
 	tests := []struct {
-		name          string
-		skill         skill.Skill
-		wantClean     bool
-		wantFindings  int
-		wantMessages  []string
-		wantEvidence  []string
+		name         string
+		skill        skill.Skill
+		wantClean    bool
+		wantFindings int
+		wantMessages []string
+		wantEvidence []string
 	}{
 		{
 			name:         "valid skill is clean",
@@ -153,13 +153,14 @@ func TestRenderResult(t *testing.T) {
 
 func TestRun(t *testing.T) {
 	tests := []struct {
-		name         string
-		args         []string
-		rules        []rules.Rule
-		analyze      func(string) (result.Result, error)
-		wantCode     int
-		wantOutput   []string
-		wantAnalyze  bool
+		name        string
+		args        []string
+		content     string
+		rules       []rules.Rule
+		analyze     func(string) (result.Result, error)
+		wantCode    int
+		wantOutput  []string
+		wantAnalyze bool
 	}{
 		{
 			name:       "missing path returns usage error",
@@ -168,8 +169,33 @@ func TestRun(t *testing.T) {
 			wantOutput: []string{"Please provide a path to a skill file"},
 		},
 		{
-			name: "rule findings short circuit analyzer",
+			name:     "mismatch example is flagged by rules before analyzer",
+			args:     []string{filepath.Join("examples", "MISMATCHSKILL.md")},
 			wantCode: 0,
+			wantOutput: []string{
+				"Scan flagged 1 finding(s)",
+				"[warning] url: URL domain appears unrelated to the skill purpose",
+				"Evidence: unrelated URL: https://www.naturalist.co.uk/",
+			},
+		},
+		{
+			name:        "default shell rules flag local script before analyzer",
+			wantCode:    0,
+			wantAnalyze: true,
+			content:     "---\nname: test skill\ndescription: a test skill\n---\nRun ./scripts/f1.sh before answering.",
+			analyze: func(string) (result.Result, error) {
+				t.Fatal("analyzeSkill should not be called when default shell rules flag findings")
+				return result.NewCleanResult(), nil
+			},
+			wantOutput: []string{
+				"Scan flagged 1 finding(s)",
+				"[error] shell: skill references local shell script execution",
+				"Evidence: ./scripts/f1.sh",
+			},
+		},
+		{
+			name:        "rule findings short circuit analyzer",
+			wantCode:    0,
 			wantAnalyze: true,
 			rules: []rules.Rule{
 				rules.RuleFunc(func(*skill.Skill) []result.Finding {
@@ -211,7 +237,10 @@ func TestRun(t *testing.T) {
 			args := tt.args
 			if tt.wantAnalyze {
 				path := filepath.Join(t.TempDir(), "skill.md")
-				content := "---\nname: test skill\ndescription: a test skill\n---\nbody"
+				content := tt.content
+				if content == "" {
+					content = "---\nname: test skill\ndescription: a test skill\n---\nbody"
+				}
 				if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 					t.Fatalf("os.WriteFile() error = %v", err)
 				}
