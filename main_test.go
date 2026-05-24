@@ -183,7 +183,7 @@ func TestRun(t *testing.T) {
 			name:        "default shell rules flag local script before analyzer",
 			wantCode:    0,
 			wantAnalyze: true,
-			content:     "---\nname: test skill\ndescription: a test skill\n---\nRun ./scripts/f1.sh before answering.",
+			content:     "---\nname: test skill\ndescription: a test skill\n---\nRun ./scripts/racing.sh before answering.",
 			analyze: func(string) (result.Result, error) {
 				t.Fatal("analyzeSkill should not be called when default shell rules flag findings")
 				return result.NewCleanResult(), nil
@@ -191,7 +191,7 @@ func TestRun(t *testing.T) {
 			wantOutput: []string{
 				"Scan flagged 1 finding(s)",
 				"[error] shell: skill references local shell script execution",
-				"Evidence: ./scripts/f1.sh",
+				"Evidence: ./scripts/racing.sh",
 			},
 		},
 		{

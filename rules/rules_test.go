@@ -89,12 +89,12 @@ func TestDefaultRules(t *testing.T) {
 		},
 		{
 			name:         "body topic diverges from description",
-			skill:        &skill.Skill{Name: "test skill", Description: "Provides formula one information to the agent", Body: "Look up Formula 1 race news and then give detailed bird watching holiday advice for rare seabirds."},
+			skill:        &skill.Skill{Name: "test skill", Description: "Provides current racing information to the agent", Body: "Look up current racing circuit news and then give detailed bird watching holiday advice for rare seabirds."},
 			wantClean:    false,
 			wantFindings: 1,
 			wantMessages: []string{"skill instructions diverge from declared purpose"},
 			wantSeverity: []result.Severity{result.SeverityWarning},
-			wantEvidence: []string{"description keywords [agent formula information provides] conflict with instruction section [advice bird detailed give holiday rare seabirds watching]"},
+			wantEvidence: []string{"description keywords [agent current information provides racing] conflict with instruction section [advice bird detailed give holiday rare seabirds watching]"},
 		},
 		{
 			name:         "generic bash reference is flagged as warning",
@@ -138,15 +138,15 @@ func TestDefaultRules(t *testing.T) {
 			wantSeverity: []result.Severity{result.SeverityWarning, result.SeverityWarning},
 			wantEvidence: []string{
 				"unrelated URL: https://www.naturalist.co.uk/?gad_source=1&gad_campaignid=261771380&gbraid=0AAAAADlv47Q-DKFV9Nkw-BLD0MAaHqtJZ&gclid=Cj0KCQiA-YvMBhDtARIsAHZuUzLR9JOhk9SuaBpqQ1USQek8o8hA-vnA2NoB5DRu_Uz5djQnmn6-jg8aAp0pEALw_wcB (domain: naturalist.co.uk)",
-				"description keywords [agent date formula information informs] conflict with instruction section [agent best bird holiday inform spots watching]",
+				"description keywords [agent current find information informs] conflict with instruction section [agent best bird holiday inform spots watching]",
 			},
 		},
 		{
 			name: "related urls stay clean",
 			skill: &skill.Skill{
-				Name:        "formula one updates",
-				Description: "Help the agent find current Formula 1 team and driver information",
-				Body:        "Check https://www.formula1.com/en/teams and https://www.formula1.com/en/drivers for the latest Formula 1 updates.",
+				Name:        "racing updates",
+				Description: "Help the agent find current racing team and driver information",
+				Body:        "Check https://www.racing.example.com/teams and https://www.racing.example.com/drivers for the latest racing updates.",
 			},
 			wantClean:    true,
 			wantFindings: 0,
@@ -154,9 +154,9 @@ func TestDefaultRules(t *testing.T) {
 		{
 			name: "mixed related and unrelated urls only flag the unrelated domain",
 			skill: &skill.Skill{
-				Name:        "formula one updates",
-				Description: "Help the agent find current Formula 1 team and driver information",
-				Body:        "Use https://www.formula1.com/en/drivers for F1 details, then check https://birdwatching.example.com/hotspots for extra reading.",
+				Name:        "racing updates",
+				Description: "Help the agent find current racing team and driver information",
+				Body:        "Use https://www.racing.example.com/drivers for racing details, then check https://birdwatching.example.com/hotspots for extra reading.",
 			},
 			wantClean:    false,
 			wantFindings: 1,

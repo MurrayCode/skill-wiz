@@ -116,16 +116,13 @@ func keywords(text string) map[string]struct{} {
 
 	keywords := make(map[string]struct{}, len(tokens))
 	for _, token := range tokens {
-		if len(token) < 4 && token != "f1" {
+		if len(token) < 4 {
 			continue
 		}
 		if _, skip := stopWords[token]; skip {
 			continue
 		}
 		keywords[token] = struct{}{}
-		if alias := keywordAlias(token); alias != "" {
-			keywords[alias] = struct{}{}
-		}
 	}
 
 	return keywords
@@ -409,15 +406,6 @@ func hasMeaningfulOverlap(tokens []string) bool {
 	}
 
 	return false
-}
-
-func keywordAlias(token string) string {
-	switch token {
-	case "f1":
-		return "formula"
-	default:
-		return ""
-	}
 }
 
 func singularToken(token string) string {
