@@ -1,6 +1,10 @@
 package main
 
 import (
+	"bytes"
+	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -132,6 +136,70 @@ func TestRenderResult(t *testing.T) {
 			for _, want := range tt.wants {
 				if !strings.Contains(got, want) {
 					t.Fatalf("renderResult() = %q, want substring %q", got, want)
+				}
+			}
+		})
+	}
+}
+
+func TestRun(t *testing.T) {
+	tests := []struct {
+		name         string
+		args         []string
+		analyze      func(string) (result.Result, error)
+		wantCode     int
+		wantOutput   []string
+		wantAnalyze  bool
+	}{
+		{
+			name:       "missing path returns usage error",
+			args:       nil,
+			wantCode:   1,
+			wantOutput: []string{"Please provide a path to a skill file"},
+		},
+		{
+			name:     "analysis failure returns useful message",
+			wantCode: 1,
+			analyze: func(string) (result.Result, error) {
+				return result.Result{}, errors.New("missing GEMINI_API_KEY")
+			},
+			wantAnalyze: true,
+			wantOutput:  []string{"failed to analyze skill: missing GEMINI_API_KEY"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+
+			args := tt.args
+			if tt.wantAnalyze {
+				path := filepath.Join(t.TempDir(), "skill.md")
+				content := "---\nname: test skill\ndescription: a test skill\n---\nbody"
+				if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+					t.Fatalf("os.WriteFile() error = %v", err)
+				}
+				args = []string{path}
+			}
+
+			analyze := analyzeSkill
+			if tt.analyze != nil {
+				analyzeSkill = tt.analyze
+			}
+			defer func() {
+				analyzeSkill = analyze
+			}()
+
+			gotCode := run(args, &stdout, &stderr)
+			if gotCode != tt.wantCode {
+				t.Fatalf("run() code = %d, want %d", gotCode, tt.wantCode)
+			}
+
+			combined := stdout.String() + stderr.String()
+			for _, want := range tt.wantOutput {
+				if !strings.Contains(combined, want) {
+					t.Fatalf("run() output = %q, want substring %q", combined, want)
 				}
 			}
 		})
