@@ -31,7 +31,7 @@ This tracker records implementation progress for backlog stories in `docs/backlo
 | Story | Status | Completed On | Notes |
 | --- | --- | --- | --- |
 | `P2-001-rules-package.md` | `done` | 2026-05-24 | Added a `rules` package with a shared rule contract, default deterministic rule set, scanner aggregation, and verified `go test ./...`. |
-| `P2-002-shell-execution-rules.md` | `todo` |  |  |
+| `P2-002-shell-execution-rules.md` | `done` | 2026-05-24 | Added default shell execution rules with evidence snippets, tuned local script execution to error severity, covered the hidden bash fixture, and verified `go test ./...`. |
 | `P2-003-url-and-domain-rules.md` | `todo` |  |  |
 | `P2-004-mismatch-heuristics.md` | `todo` |  |  |
 | `P2-005-fixture-driven-tests.md` | `todo` |  |  |
