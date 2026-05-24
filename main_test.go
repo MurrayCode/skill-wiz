@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/murraycode/skill-wiz/rules"
 	"github.com/murraycode/skill-wiz/result"
 	"github.com/murraycode/skill-wiz/skill"
 )
@@ -154,6 +155,7 @@ func TestRun(t *testing.T) {
 	tests := []struct {
 		name         string
 		args         []string
+		rules        []rules.Rule
 		analyze      func(string) (result.Result, error)
 		wantCode     int
 		wantOutput   []string
@@ -164,6 +166,31 @@ func TestRun(t *testing.T) {
 			args:       nil,
 			wantCode:   1,
 			wantOutput: []string{"Please provide a path to a skill file"},
+		},
+		{
+			name: "rule findings short circuit analyzer",
+			wantCode: 0,
+			wantAnalyze: true,
+			rules: []rules.Rule{
+				rules.RuleFunc(func(*skill.Skill) []result.Finding {
+					return []result.Finding{{
+						Source:   result.SourceRule,
+						Category: result.Category("shell"),
+						Severity: result.SeverityWarning,
+						Message:  "shell execution found",
+						Evidence: result.Evidence{Summary: "bash command in body"},
+					}}
+				}),
+			},
+			analyze: func(string) (result.Result, error) {
+				t.Fatal("analyzeSkill should not be called when rules already flagged findings")
+				return result.NewCleanResult(), nil
+			},
+			wantOutput: []string{
+				"Scan flagged 1 finding(s)",
+				"[warning] shell: shell execution found",
+				"Evidence: bash command in body",
+			},
 		},
 		{
 			name:     "analysis failure returns useful message",
@@ -192,11 +219,16 @@ func TestRun(t *testing.T) {
 			}
 
 			analyze := analyzeSkill
+			scanRules := skillRules
 			if tt.analyze != nil {
 				analyzeSkill = tt.analyze
 			}
+			if tt.rules != nil {
+				skillRules = tt.rules
+			}
 			defer func() {
 				analyzeSkill = analyze
+				skillRules = scanRules
 			}()
 
 			gotCode := run(args, &stdout, &stderr)
