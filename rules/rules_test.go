@@ -3,6 +3,7 @@ package rules
 import (
 	"os"
 	"path/filepath"
+	"sort"
 	"testing"
 
 	"github.com/murraycode/skill-wiz/result"
@@ -129,11 +130,15 @@ func TestDefaultRules(t *testing.T) {
 			name:         "mismatch example flags unrelated domain",
 			skill:        mustParseSkillFile(t, filepath.Join("..", "examples", "MISMATCHSKILL.md")),
 			wantClean:    false,
-			wantFindings: 1,
-			wantMessages: []string{"URL domain appears unrelated to the skill purpose"},
-			wantSeverity: []result.Severity{result.SeverityWarning},
+			wantFindings: 2,
+			wantMessages: []string{
+				"URL domain appears unrelated to the skill purpose",
+				"skill instructions diverge from declared purpose",
+			},
+			wantSeverity: []result.Severity{result.SeverityWarning, result.SeverityWarning},
 			wantEvidence: []string{
 				"unrelated URL: https://www.naturalist.co.uk/?gad_source=1&gad_campaignid=261771380&gbraid=0AAAAADlv47Q-DKFV9Nkw-BLD0MAaHqtJZ&gclid=Cj0KCQiA-YvMBhDtARIsAHZuUzLR9JOhk9SuaBpqQ1USQek8o8hA-vnA2NoB5DRu_Uz5djQnmn6-jg8aAp0pEALw_wcB (domain: naturalist.co.uk)",
+				"description keywords [agent date formula information informs] conflict with instruction section [agent best bird holiday inform spots watching]",
 			},
 		},
 		{
@@ -188,29 +193,73 @@ func TestDefaultRules(t *testing.T) {
 
 }
 
-func TestDefaultRulesFlagsHiddenBashFixture(t *testing.T) {
-	path := filepath.Join("..", "examples", "HIDDENBASHSKILL.md")
-	content, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("os.ReadFile(%q) error = %v", path, err)
+
+func TestDefaultRulesFixtureCorpus(t *testing.T) {
+	tests := []struct {
+		name           string
+		path           string
+		wantClean      bool
+		wantCount      int
+		wantCategories []result.Category
+	}{
+		{
+			name:      "clean fixture stays clean",
+			path:      filepath.Join("..", "examples", "CLEANSKILL.md"),
+			wantClean: true,
+			wantCount: 0,
+		},
+		{
+			name:           "mismatch fixture produces mismatch findings",
+			path:           filepath.Join("..", "examples", "MISMATCHSKILL.md"),
+			wantClean:      false,
+			wantCount:      2,
+			wantCategories: []result.Category{result.Category("mismatch"), result.Category("url")},
+		},
+		{
+			name:           "hidden bash fixture produces shell findings",
+			path:           filepath.Join("..", "examples", "HIDDENBASHSKILL.md"),
+			wantClean:      false,
+			wantCount:      2,
+			wantCategories: []result.Category{result.Category("mismatch"), result.Category("shell")},
+		},
 	}
 
-	s, err := skill.Parse(string(content))
-	if err != nil {
-		t.Fatalf("skill.Parse() error = %v", err)
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := mustParseSkillFile(t, tt.path)
 
-	got := Scan(s, Default()...)
-	if got.Clean() {
-		t.Fatal("Scan(Default()).Clean() = true, want false")
-	}
+			got := Scan(s, Default()...)
 
-	finding := got.Findings[0]
-	if finding.Message != "skill references local shell script execution" {
-		t.Fatalf("finding.Message = %q, want %q", finding.Message, "skill references local shell script execution")
-	}
-	if finding.Evidence.Summary != "./scripts/f1.sh" {
-		t.Fatalf("finding.Evidence.Summary = %q, want %q", finding.Evidence.Summary, "./scripts/f1.sh")
+			if got.Clean() != tt.wantClean {
+				t.Fatalf("Scan(Default()).Clean() = %v, want %v", got.Clean(), tt.wantClean)
+			}
+			if len(got.Findings) != tt.wantCount {
+				t.Fatalf("len(Scan(Default()).Findings) = %d, want %d", len(got.Findings), tt.wantCount)
+			}
+
+			if len(tt.wantCategories) == 0 {
+				return
+			}
+
+			categories := make([]result.Category, 0, len(got.Findings))
+			for _, finding := range got.Findings {
+				categories = append(categories, finding.Category)
+			}
+			sort.Slice(categories, func(i, j int) bool {
+				return categories[i] < categories[j]
+			})
+
+			wantCategories := append([]result.Category(nil), tt.wantCategories...)
+			sort.Slice(wantCategories, func(i, j int) bool {
+				return wantCategories[i] < wantCategories[j]
+			})
+
+			for i, want := range wantCategories {
+				if categories[i] != want {
+					t.Fatalf("finding categories = %v, want %v", categories, wantCategories)
+				}
+			}
+		})
 	}
 }
 

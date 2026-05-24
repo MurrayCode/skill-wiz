@@ -18,6 +18,11 @@ var stopWords = map[string]struct{}{
 	"or": {}, "the": {}, "this": {}, "to": {}, "up": {}, "where": {}, "with": {},
 }
 
+var weakMismatchOverlap = map[string]struct{}{
+	"agent": {}, "date": {}, "information": {}, "inform": {}, "informs": {},
+	"look": {}, "most": {}, "skill": {}, "where": {},
+}
+
 var urlPattern = regexp.MustCompile(`https?://[^\s<>()]+`)
 var localShellScriptPattern = regexp.MustCompile(`(?i)(?:execute|run|invoke|launch)[^\n]*?(\./[^\s"'<>]+\.sh)`)
 var shellCommandPattern = regexp.MustCompile(`(?i)\b(?:bash|sh)\b(?:\s+-[a-z]+)?(?:\s+'[^'\n]+'|\s+"[^"\n]+"|\s+\./[^\s"'<>]+|\s+[^\s"'<>]+)?`)
@@ -74,12 +79,12 @@ func descriptionMismatchRule(s *skill.Skill) []result.Finding {
 	hasMatchingSection := false
 	for _, segment := range segments {
 		segmentKeywords := keywords(segment)
-		if len(segmentKeywords) < 3 {
+		if len(segmentKeywords) < 4 {
 			continue
 		}
 
 		overlap := intersect(descriptionKeywords, segmentKeywords)
-		if len(overlap) > 0 {
+		if hasMeaningfulOverlap(overlap) {
 			hasMatchingSection = true
 			continue
 		}
@@ -111,13 +116,16 @@ func keywords(text string) map[string]struct{} {
 
 	keywords := make(map[string]struct{}, len(tokens))
 	for _, token := range tokens {
-		if len(token) < 4 {
+		if len(token) < 4 && token != "f1" {
 			continue
 		}
 		if _, skip := stopWords[token]; skip {
 			continue
 		}
 		keywords[token] = struct{}{}
+		if alias := keywordAlias(token); alias != "" {
+			keywords[alias] = struct{}{}
+		}
 	}
 
 	return keywords
@@ -319,6 +327,9 @@ func tokenSet(text string) map[string]struct{} {
 			continue
 		}
 		set[token] = struct{}{}
+		if singular := singularToken(token); singular != token && !ignoredToken(singular) {
+			set[singular] = struct{}{}
+		}
 	}
 
 	for i := 0; i < len(tokens)-1; i++ {
@@ -326,6 +337,12 @@ func tokenSet(text string) map[string]struct{} {
 			continue
 		}
 		set[tokens[i]+tokens[i+1]] = struct{}{}
+
+		left := singularToken(tokens[i])
+		right := singularToken(tokens[i+1])
+		if !ignoredToken(left) && !ignoredToken(right) {
+			set[left+right] = struct{}{}
+		}
 	}
 
 	return set
@@ -382,4 +399,39 @@ func ignoredToken(token string) bool {
 	default:
 		return false
 	}
+}
+
+func hasMeaningfulOverlap(tokens []string) bool {
+	for _, token := range tokens {
+		if _, weak := weakMismatchOverlap[token]; !weak {
+			return true
+		}
+	}
+
+	return false
+}
+
+func keywordAlias(token string) string {
+	switch token {
+	case "f1":
+		return "formula"
+	default:
+		return ""
+	}
+}
+
+func singularToken(token string) string {
+	if len(token) <= 3 {
+		return token
+	}
+	if strings.HasSuffix(token, "ies") {
+		return token[:len(token)-3] + "y"
+	}
+	if strings.HasSuffix(token, "sses") {
+		return token[:len(token)-2]
+	}
+	if strings.HasSuffix(token, "s") && !strings.HasSuffix(token, "ss") {
+		return token[:len(token)-1]
+	}
+	return token
 }

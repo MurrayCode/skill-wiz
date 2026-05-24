@@ -173,9 +173,10 @@ func TestRun(t *testing.T) {
 			args:     []string{filepath.Join("examples", "MISMATCHSKILL.md")},
 			wantCode: 0,
 			wantOutput: []string{
-				"Scan flagged 1 finding(s)",
+				"Scan flagged 2 finding(s)",
 				"[warning] url: URL domain appears unrelated to the skill purpose",
 				"Evidence: unrelated URL: https://www.naturalist.co.uk/",
+				"[warning] mismatch: skill instructions diverge from declared purpose",
 			},
 		},
 		{
