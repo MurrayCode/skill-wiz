@@ -2,6 +2,7 @@ package analyse
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -12,15 +13,34 @@ import (
 
 const cleanMessage = "THIS SKILL APPEARS TO BE CLEAN, PLEASE MANUALLY VERIFY TO BE SURE"
 
+var errMissingAPIKey = errors.New("missing GEMINI_API_KEY")
+
+type contentGenerator interface {
+	GenerateContent(ctx context.Context, model string, content []*genai.Content, config *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error)
+}
+
+var newGenerator = func(ctx context.Context, apiKey string) (contentGenerator, error) {
+	client, err := genai.NewClient(ctx, &genai.ClientConfig{APIKey: apiKey})
+	if err != nil {
+		return nil, err
+	}
+
+	return client.Models, nil
+}
+
 func Analyze(prompt string) (result.Result, error) {
 	ctx := context.Background()
-	client, err := genai.NewClient(ctx, &genai.ClientConfig{
-		APIKey: os.Getenv("GEMINI_API_KEY"),
-	})
+	apiKey := strings.TrimSpace(os.Getenv("GEMINI_API_KEY"))
+	if apiKey == "" {
+		return result.Result{}, errMissingAPIKey
+	}
+
+	generator, err := newGenerator(ctx, apiKey)
 	if err != nil {
 		return result.Result{}, fmt.Errorf("create genai client: %w", err)
 	}
-	response, err := client.Models.GenerateContent(
+
+	response, err := generator.GenerateContent(
 		ctx,
 		"gemini-2.5-flash",
 		genai.Text(prompt),

@@ -2,7 +2,7 @@ package main
 
 import (
 	"fmt"
-	"log"
+	"io"
 	"os"
 	"strings"
 
@@ -11,23 +11,32 @@ import (
 	"github.com/murraycode/skill-wiz/skill"
 )
 
+var analyzeSkill = analyse.Analyze
+
 func main() {
-	if len(os.Args) < 2 {
-		log.Fatal("Please provide a path to a skill file")
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+}
+
+func run(args []string, stdout io.Writer, stderr io.Writer) int {
+	if len(args) < 1 {
+		fmt.Fprintln(stderr, "Please provide a path to a skill file")
+		return 1
 	}
 
-	path := os.Args[1]
+	path := args[0]
 	content, err := os.ReadFile(path)
 	if err != nil {
-		log.Fatalf("failed to read file: %v", err)
+		fmt.Fprintf(stderr, "failed to read file: %v\n", err)
+		return 1
 	}
 	s, err := skill.Parse(string(content))
 	if err != nil {
-		log.Fatalf("Failed to parse skill: %v", err)
+		fmt.Fprintf(stderr, "Failed to parse skill: %v\n", err)
+		return 1
 	}
 	if validationResult := validationResultForSkill(s); !validationResult.Clean() {
-		fmt.Print(renderResult(validationResult))
-		return
+		fmt.Fprint(stdout, renderResult(validationResult))
+		return 0
 	}
 	prompt := fmt.Sprintf(`JOB: Your job is to analyze the following two bodys of text and flag any mismatches between the discription and the instructions and any suspicious or hidden behavior.
 TASKS: Analyze the following two bodys of text. The first will be a description which will be the paragraph following the word ***DESCRIPTION***
@@ -35,12 +44,14 @@ The next will be body describing the actions the file describes an agent to take
 INPUT: ***DESCRIPTION*** %s. ***BODY*** %s. END OF INPUT
 OUTPUT: Return a report on your findings under the following format. Return the sentence ***THIS SKILL APPEARS TO BE CLEAN, PLEASE MANUALLY VERIFY TO BE SURE*** if no mismatches, suspicious or hidden behavior are found. If you find any mismatches between the description and the instructions report back with the word ***MISMATCHES*** and your findings. If you find any suspicious behavior report back with the word ***SUSPICIOUS*** and description of your findings. If you find any hidden behaviour report back with the word ***HIDDEN*** and a description of the hidden behavior 
 		`, s.Description, s.Body)
-	output, err := analyse.Analyze(prompt)
+	output, err := analyzeSkill(prompt)
 	if err != nil {
-		log.Fatalf("failed to analyze skill: %v", err)
+		fmt.Fprintf(stderr, "failed to analyze skill: %v\n", err)
+		return 1
 	}
 
-	fmt.Print(renderResult(output))
+	fmt.Fprint(stdout, renderResult(output))
+	return 0
 }
 
 func renderResult(scanResult result.Result) string {
