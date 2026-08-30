@@ -359,18 +359,20 @@ func TestRenderReportPointer(t *testing.T) {
 
 func TestRun(t *testing.T) {
 	tests := []struct {
-		name        string
-		args        []string
-		flags       []string
-		content     string
-		rules       []rules.Rule
-		analyzer    scanner.Analyzer
-		wantCode    int
-		wantOutput  []string
-		wantAnalyze bool
-		wantReport  []string
-		wantConfig  *analyse.Config
-		wantJSON    *jsonReport
+		name         string
+		args         []string
+		flags        []string
+		content      string
+		rules        []rules.Rule
+		analyzer     scanner.Analyzer
+		wantCode     int
+		wantOutput   []string
+		wantMissing  []string
+		wantNoStdout bool
+		wantAnalyze  bool
+		wantReport   []string
+		wantConfig   *analyse.Config
+		wantJSON     *jsonReport
 	}{
 		{
 			name:       "missing path returns usage error",
@@ -486,6 +488,53 @@ func TestRun(t *testing.T) {
 			wantOutput:  []string{"failed to analyze skill: missing GEMINI_API_KEY"},
 		},
 		{
+			name:        "analyzer failure after rule findings still reports the scan",
+			wantCode:    0,
+			wantAnalyze: true,
+			content:     "---\nname: test skill\ndescription: a test skill\n---\nRun ./scripts/racing.sh before answering.",
+			analyzer: scanner.AnalyzerFunc(func(*skill.Skill) (result.Result, error) {
+				return result.Result{}, errors.New("missing GEMINI_API_KEY")
+			}),
+			wantOutput: []string{
+				"Scan flagged 1 finding(s) from rule checks",
+				"[error] shell (rule): skill references local shell script execution",
+			},
+			wantMissing: []string{"failed to analyze skill"},
+			wantReport:  []string{"skill references local shell script execution"},
+		},
+		{
+			name:        "unusable analyzer response is reported instead of a clean result",
+			wantCode:    0,
+			wantAnalyze: true,
+			analyzer: scanner.AnalyzerFunc(func(*skill.Skill) (result.Result, error) {
+				return result.NewResult(result.Finding{
+					Source:   result.SourceAnalyzer,
+					Category: result.Category("analysis"),
+					Severity: result.SeverityWarning,
+					Message:  "Analyzer returned unusable response",
+					Evidence: result.Evidence{Summary: "invalid analyzer JSON"},
+				}), nil
+			}),
+			wantOutput: []string{
+				"Scan flagged 1 finding(s) from analyzer checks",
+				"[warning] analysis (analyzer): Analyzer returned unusable response",
+				"Evidence: invalid analyzer JSON",
+			},
+			wantMissing: []string{"THIS SKILL APPEARS TO BE CLEAN"},
+			wantReport:  []string{"Analyzer returned unusable response"},
+		},
+		{
+			name:        "analysis failure in json mode reports the error and prints no JSON",
+			flags:       []string{"--json"},
+			wantCode:    1,
+			wantAnalyze: true,
+			analyzer: scanner.AnalyzerFunc(func(*skill.Skill) (result.Result, error) {
+				return result.Result{}, errors.New("generate analysis: upstream unavailable")
+			}),
+			wantOutput:   []string{"failed to analyze skill: generate analysis: upstream unavailable"},
+			wantNoStdout: true,
+		},
+		{
 			name:       "unknown flag returns a clear error",
 			args:       []string{"--nope", filepath.Join("examples", "CLEANSKILL.md")},
 			wantCode:   1,
@@ -578,6 +627,16 @@ func TestRun(t *testing.T) {
 				if !strings.Contains(combined, want) {
 					t.Fatalf("run() output = %q, want substring %q", combined, want)
 				}
+			}
+
+			for _, missing := range tt.wantMissing {
+				if strings.Contains(combined, missing) {
+					t.Fatalf("run() output = %q, want no substring %q", combined, missing)
+				}
+			}
+
+			if tt.wantNoStdout && stdout.Len() != 0 {
+				t.Fatalf("run() stdout = %q, want empty", stdout.String())
 			}
 
 			if tt.wantConfig != nil && gotConfig != *tt.wantConfig {
