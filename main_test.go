@@ -176,6 +176,22 @@ func TestRenderResult(t *testing.T) {
 	}
 }
 
+func TestRenderReportPointer(t *testing.T) {
+	got := renderReportPointer("/tmp/reports/skill-wiz-report.html")
+
+	wants := []string{
+		"/tmp/reports/skill-wiz-report.html",
+		"file:///tmp/reports/skill-wiz-report.html",
+		"browser",
+	}
+
+	for _, want := range wants {
+		if !strings.Contains(got, want) {
+			t.Fatalf("renderReportPointer() = %q, want substring %q", got, want)
+		}
+	}
+}
+
 func TestRun(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -186,6 +202,7 @@ func TestRun(t *testing.T) {
 		wantCode    int
 		wantOutput  []string
 		wantAnalyze bool
+		wantReport  []string
 	}{
 		{
 			name:       "missing path returns usage error",
@@ -202,6 +219,12 @@ func TestRun(t *testing.T) {
 				"[warning] url (rule): URL domain appears unrelated to the skill purpose",
 				"Evidence: unrelated URL: https://www.naturalist.co.uk/",
 				"[warning] mismatch (rule): skill instructions diverge from declared purpose",
+				"HTML report:",
+			},
+			wantReport: []string{
+				"URL domain appears unrelated to the skill purpose",
+				"unrelated URL: https://www.naturalist.co.uk/",
+				"skill-wiz",
 			},
 		},
 		{
@@ -223,6 +246,11 @@ func TestRun(t *testing.T) {
 				"[error] shell (rule): skill references local shell script execution",
 				"Evidence: ./scripts/racing.sh",
 				"[warning] hidden (analyzer): hidden follow-up action detected",
+			},
+			wantReport: []string{
+				"skill references local shell script execution",
+				"./scripts/racing.sh",
+				"hidden follow-up action detected",
 			},
 		},
 		{
@@ -255,6 +283,30 @@ func TestRun(t *testing.T) {
 				"Evidence: bash command in body",
 				"[warning] hidden (analyzer): hidden follow-up action detected",
 			},
+			wantReport: []string{
+				"shell execution found",
+				"bash command in body",
+				"hidden follow-up action detected",
+			},
+		},
+		{
+			name:        "validation failures are reported without running the analyzer",
+			wantCode:    0,
+			wantAnalyze: true,
+			content:     "---\nlicense: MIT\n---\nbody",
+			analyzer: scanner.AnalyzerFunc(func(*skill.Skill) (result.Result, error) {
+				t.Fatal("analyzer ran despite validation failure")
+				return result.Result{}, nil
+			}),
+			wantOutput: []string{
+				"Scan flagged 2 finding(s) from validation checks",
+				"HTML report:",
+			},
+			wantReport: []string{
+				"field name is required",
+				"missing required field: description",
+				"skill.md",
+			},
 		},
 		{
 			name:     "analysis failure returns useful message",
@@ -271,6 +323,11 @@ func TestRun(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			var stdout bytes.Buffer
 			var stderr bytes.Buffer
+
+			reportDestination := filepath.Join(t.TempDir(), "skill-wiz-report.html")
+			originalReportPath := reportPath
+			reportPath = func() (string, error) { return reportDestination, nil }
+			defer func() { reportPath = originalReportPath }()
 
 			args := tt.args
 			if tt.wantAnalyze {
@@ -307,6 +364,22 @@ func TestRun(t *testing.T) {
 			for _, want := range tt.wantOutput {
 				if !strings.Contains(combined, want) {
 					t.Fatalf("run() output = %q, want substring %q", combined, want)
+				}
+			}
+
+			reportContent, err := os.ReadFile(reportDestination)
+			if len(tt.wantReport) == 0 {
+				if err == nil {
+					t.Fatalf("run() wrote an HTML report, want none")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("os.ReadFile(report) error = %v, want nil", err)
+			}
+			for _, want := range tt.wantReport {
+				if !strings.Contains(string(reportContent), want) {
+					t.Fatalf("run() report missing substring %q", want)
 				}
 			}
 		})

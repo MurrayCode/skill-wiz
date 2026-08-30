@@ -1,0 +1,334 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>skill-wiz report — {{.SkillName}}</title>
+<style>
+:root {
+  --ink: #08060d;
+  --surface: #12101c;
+  --surface-raised: #191524;
+  --line: #2a2340;
+  --line-soft: #201b30;
+  --text: #ece9f6;
+  --muted: #948cae;
+  --accent: #a487ff;
+  --accent-deep: #6f4fd8;
+  --error: #ff7089;
+  --warning: #f2b955;
+  --info: #5fb8f5;
+  --pass: #55d6a0;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  --sans: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: 0 1.5rem 5rem;
+  background:
+    radial-gradient(1100px 520px at 50% -280px, rgba(111, 79, 216, 0.22), transparent 70%),
+    var(--ink);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 15px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+.page { max-width: 860px; margin: 0 auto; }
+
+.masthead {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  padding: 2.25rem 0 2rem;
+}
+
+.sigil { width: 30px; height: 30px; flex: none; }
+
+.wordmark {
+  font-family: var(--mono);
+  font-size: 0.95rem;
+  letter-spacing: 0.04em;
+  color: var(--text);
+}
+
+.wordmark span { color: var(--accent); }
+
+.masthead .kicker {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.subject { padding-bottom: 2rem; border-bottom: 1px solid var(--line-soft); }
+
+h1 {
+  margin: 0 0 0.5rem;
+  font-size: 1.9rem;
+  line-height: 1.25;
+  letter-spacing: -0.015em;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.description {
+  margin: 0 0 1.25rem;
+  color: var(--muted);
+  max-width: 62ch;
+  overflow-wrap: anywhere;
+}
+
+.meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 1.5rem;
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.meta b { font-weight: 400; color: var(--accent); }
+
+.meta .value { color: var(--text); overflow-wrap: anywhere; }
+
+.verdict {
+  margin: 2rem 0 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem 1rem;
+  padding: 1.15rem 1.35rem;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--tone, var(--accent));
+  border-radius: 10px;
+}
+
+.verdict.tone-error { --tone: var(--error); }
+.verdict.tone-warning { --tone: var(--warning); }
+.verdict.tone-info { --tone: var(--info); }
+.verdict.tone-clean { --tone: var(--pass); }
+
+.verdict-headline {
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: var(--tone, var(--accent));
+}
+
+.verdict-detail {
+  flex: 1 1 22ch;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.tally { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+
+.count {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.05em;
+  padding: 0.2rem 0.55rem;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--surface-raised);
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.count.severity-error { color: var(--error); border-color: rgba(255, 112, 137, 0.4); }
+.count.severity-warning { color: var(--warning); border-color: rgba(242, 185, 85, 0.4); }
+.count.severity-info { color: var(--info); border-color: rgba(95, 184, 245, 0.4); }
+
+.section-label {
+  margin: 2.5rem 0 0.85rem;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.finding-card {
+  position: relative;
+  margin-bottom: 0.85rem;
+  padding: 1.15rem 1.35rem;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.finding-card::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 1.15rem;
+  bottom: 1.15rem;
+  width: 2px;
+  border-radius: 2px;
+  background: var(--tone, var(--accent));
+}
+
+.finding-card.severity-error { --tone: var(--error); }
+.finding-card.severity-warning { --tone: var(--warning); }
+.finding-card.severity-info { --tone: var(--info); }
+
+.finding-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.6rem;
+}
+
+.pill {
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 0.16rem 0.5rem;
+  border-radius: 4px;
+  background: var(--tone, var(--accent));
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.chip {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  color: var(--text);
+  padding: 0.16rem 0.5rem;
+  border-radius: 4px;
+  background: var(--surface-raised);
+  border: 1px solid var(--line);
+}
+
+.chip.source { margin-left: auto; color: var(--muted); }
+
+.finding-message {
+  margin: 0;
+  font-size: 1rem;
+  overflow-wrap: anywhere;
+}
+
+.evidence {
+  margin: 0.85rem 0 0;
+  padding: 0.7rem 0.9rem;
+  background: var(--ink);
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  overflow-x: auto;
+}
+
+.evidence-label {
+  display: block;
+  font-family: var(--mono);
+  font-size: 0.65rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 0.35rem;
+}
+
+.evidence code {
+  font-family: var(--mono);
+  font-size: 0.82rem;
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.clean-panel {
+  margin-top: 2rem;
+  padding: 2rem 1.35rem;
+  text-align: center;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.clean-panel p { margin: 0; color: var(--muted); max-width: 52ch; margin-inline: auto; }
+
+.footnote {
+  margin-top: 2.5rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid var(--line-soft);
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+</style>
+</head>
+<body>
+<div class="page">
+
+  <header class="masthead">
+    <svg class="sigil" viewBox="0 0 32 32" aria-hidden="true">
+      <defs>
+        <linearGradient id="sigilFill" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stop-color="#c9b4ff"/>
+          <stop offset="1" stop-color="#6f4fd8"/>
+        </linearGradient>
+      </defs>
+      <path d="M16 1.6 28.5 8.8v14.4L16 30.4 3.5 23.2V8.8Z" fill="none" stroke="url(#sigilFill)" stroke-width="1.6" stroke-linejoin="round"/>
+      <path d="M16 8.5l1.9 4.4 4.6 1.6-4.6 1.6L16 20.5l-1.9-4.4-4.6-1.6 4.6-1.6Z" fill="url(#sigilFill)"/>
+    </svg>
+    <span class="wordmark">skill<span>-wiz</span></span>
+    <span class="kicker">Scan report</span>
+  </header>
+
+  <section class="subject">
+    <h1>{{.SkillName}}</h1>
+    {{if .SkillDescription}}<p class="description">{{.SkillDescription}}</p>{{end}}
+    <div class="meta">
+      <span><b>file</b> <span class="value">{{.SourcePath}}</span></span>
+      <span><b>scanned</b> <span class="value">{{.GeneratedAt}}</span></span>
+      {{if .Sources}}<span><b>checks</b> <span class="value">{{.Sources}}</span></span>{{end}}
+    </div>
+  </section>
+
+  <section class="verdict tone-{{.VerdictTone}}">
+    <span class="verdict-headline">{{.Verdict}}</span>
+    <span class="verdict-detail">{{.VerdictDetail}}</span>
+    {{if .Counts}}
+    <span class="tally">
+      {{range .Counts}}<span class="count severity-{{.Severity}}">{{.Count}} {{.Label}}</span>{{end}}
+    </span>
+    {{end}}
+  </section>
+
+  {{if .Findings}}
+  <h2 class="section-label">Findings</h2>
+  {{range .Findings}}
+  <article class="finding-card severity-{{.Severity}}">
+    <div class="finding-head">
+      <span class="pill">{{.Severity}}</span>
+      <span class="chip">{{.Category}}</span>
+      {{if .Source}}<span class="chip source">{{.Source}}</span>{{end}}
+    </div>
+    <p class="finding-message">{{.Message}}</p>
+    {{if .Evidence}}
+    <div class="evidence">
+      <span class="evidence-label">Evidence</span>
+      <code>{{.Evidence}}</code>
+    </div>
+    {{end}}
+  </article>
+  {{end}}
+  {{else}}
+  <div class="clean-panel">
+    <p>Deterministic rules and the model-assisted analyser both came back empty. That is not a guarantee — read the skill before trusting it.</p>
+  </div>
+  {{end}}
+
+  <p class="footnote">Generated by skill-wiz. Deterministic rules always run; the model layer only enriches them. Treat this report as a review aid, not a verdict.</p>
+
+</div>
+</body>
+</html>

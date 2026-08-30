@@ -65,10 +65,24 @@ THIS SKILL APPEARS TO BE CLEAN, PLEASE MANUALLY VERIFY TO BE SURE
 If the analyzer flags something, the CLI prints a short report like this:
 
 ```text
-Scan flagged 1 finding(s)
-[warning] analysis: Analyzer reported potential issues
+Scan flagged 1 finding(s) from analyzer checks
+[warning] analysis (analyzer): Analyzer reported potential issues
 Evidence: SUSPICIOUS: hidden shell execution
 ```
+
+### HTML report
+
+Every scan also writes a self-contained `skill-wiz-report.html` into the current
+working directory and prints a link to it:
+
+```text
+HTML report: /path/to/cwd/skill-wiz-report.html
+Open it in your browser: file:///path/to/cwd/skill-wiz-report.html
+```
+
+The report groups findings by severity and shows the category, source, and
+evidence for each one. It has no external dependencies, so it opens straight
+from disk. Each scan overwrites the previous report.
 
 ## Notes
 
