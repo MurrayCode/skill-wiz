@@ -55,6 +55,7 @@ This tracker records implementation progress for backlog stories in `docs/backlo
 | `P4-003-exit-codes.md` | `todo` |  |  |
 | `P4-004-human-readable-output.md` | `todo` |  |  |
 | `P4-005-readme-usage.md` | `todo` |  |  |
+| `P4-006-html-report.md` | `done` | 2026-08-30 | Added a `report` package that renders scans to a self-contained dark-themed HTML page, wired it into the CLI with a `file://` pointer, and verified `go test ./...`. |
 
 ## Phase 5
 
