@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/murraycode/skill-wiz/result"
+	"github.com/murraycode/skill-wiz/rules"
+	"github.com/murraycode/skill-wiz/scanner"
 	"github.com/murraycode/skill-wiz/skill"
 	"google.golang.org/genai"
 )
@@ -53,6 +55,28 @@ func (s *stubGenerator) GenerateContent(ctx context.Context, model string, conte
 	}
 
 	return s.generate(model, content, config)
+}
+
+// blockingGenerator stands in for an upstream that never answers, so the
+// request context deadline is what ends the call.
+type blockingGenerator struct{}
+
+func (blockingGenerator) GenerateContent(ctx context.Context, _ string, _ []*genai.Content, _ *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
+	<-ctx.Done()
+
+	return nil, ctx.Err()
+}
+
+// stubNewGenerator swaps the model seam for the duration of a test, so no test
+// in this package needs remote access.
+func stubNewGenerator(t *testing.T, generator contentGenerator, err error) {
+	t.Helper()
+
+	original := newGenerator
+	newGenerator = func(context.Context, string) (contentGenerator, error) {
+		return generator, err
+	}
+	t.Cleanup(func() { newGenerator = original })
 }
 
 func textFromContent(content *genai.Content) string {
@@ -316,6 +340,39 @@ func TestResultFromText(t *testing.T) {
 			wantMessage:  analyzerUnusableResponseMessage,
 			wantEvidence: "analyzer finding 1 missing evidence",
 		},
+		{
+			name:         "unsupported severity becomes unusable response finding",
+			text:         `{"findings":[{"category":"mismatch","severity":"critical","message":"Description does not match body","evidence":"description says linting but body fetches URLs"}]}`,
+			wantClean:    false,
+			wantCount:    1,
+			wantSource:   result.SourceAnalyzer,
+			wantCategory: result.Category("analysis"),
+			wantSeverity: result.SeverityWarning,
+			wantMessage:  analyzerUnusableResponseMessage,
+			wantEvidence: "analyzer finding 1 has invalid severity",
+		},
+		{
+			name:         "response without clean flag or findings becomes unusable response finding",
+			text:         `{"findings":[]}`,
+			wantClean:    false,
+			wantCount:    1,
+			wantSource:   result.SourceAnalyzer,
+			wantCategory: result.Category("analysis"),
+			wantSeverity: result.SeverityWarning,
+			wantMessage:  analyzerUnusableResponseMessage,
+			wantEvidence: "analyzer response contained no findings",
+		},
+		{
+			name:         "clean flag alongside findings becomes unusable response finding",
+			text:         `{"clean":true,"findings":[{"category":"mismatch","severity":"warning","message":"Description does not match body","evidence":"body fetches URLs"}]}`,
+			wantClean:    false,
+			wantCount:    1,
+			wantSource:   result.SourceAnalyzer,
+			wantCategory: result.Category("analysis"),
+			wantSeverity: result.SeverityWarning,
+			wantMessage:  analyzerUnusableResponseMessage,
+			wantEvidence: "clean analyzer response included findings",
+		},
 	}
 
 	for _, tt := range tests {
@@ -406,6 +463,243 @@ func TestAnalyzeWithConfig(t *testing.T) {
 			}
 			if stub.deadline > tt.wantTimeout || stub.deadline < tt.wantTimeout-time.Second {
 				t.Fatalf("generator context deadline = %v, want ~%v", stub.deadline, tt.wantTimeout)
+			}
+		})
+	}
+}
+
+func TestAnalyzeClientCreationFailure(t *testing.T) {
+	t.Setenv("GEMINI_API_KEY", "test-key")
+	stubNewGenerator(t, nil, errors.New("dial upstream: refused"))
+
+	_, err := Analyze("prompt text")
+	if err == nil {
+		t.Fatal("Analyze() error = nil, want non-nil")
+	}
+	if err.Error() != "create genai client: dial upstream: refused" {
+		t.Fatalf("Analyze() error = %q, want %q", err.Error(), "create genai client: dial upstream: refused")
+	}
+}
+
+func TestAnalyzeWithConfigUpstreamTimeout(t *testing.T) {
+	t.Setenv("GEMINI_API_KEY", "test-key")
+	stubNewGenerator(t, blockingGenerator{}, nil)
+
+	_, err := AnalyzeWithConfig("prompt text", Config{Timeout: 20 * time.Millisecond})
+	if err == nil {
+		t.Fatal("AnalyzeWithConfig() error = nil, want non-nil")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("AnalyzeWithConfig() error = %v, want context.DeadlineExceeded", err)
+	}
+	if !strings.HasPrefix(err.Error(), "generate analysis: ") {
+		t.Fatalf("AnalyzeWithConfig() error = %q, want %q prefix", err.Error(), "generate analysis: ")
+	}
+}
+
+func TestGeminiAnalyzerAnalyzeMalformedResponseIsNotClean(t *testing.T) {
+	tests := []struct {
+		name         string
+		responseText string
+		wantEvidence string
+	}{
+		{
+			name:         "prose instead of JSON",
+			responseText: "The skill looks fine to me.",
+			wantEvidence: "invalid analyzer JSON",
+		},
+		{
+			name:         "markdown fenced JSON",
+			responseText: "```json\n{\"clean\": true}\n```",
+			wantEvidence: "invalid analyzer JSON",
+		},
+		{
+			name:         "empty response",
+			responseText: "",
+			wantEvidence: "empty analyzer response",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("GEMINI_API_KEY", "test-key")
+			stubNewGenerator(t, &stubGenerator{responseText: tt.responseText}, nil)
+
+			got, err := (GeminiAnalyzer{}).Analyze(&skill.Skill{
+				Name:        "test skill",
+				Description: "a test skill",
+				Body:        "body",
+			})
+			if err != nil {
+				t.Fatalf("GeminiAnalyzer.Analyze() error = %v, want nil", err)
+			}
+			if got.Clean() {
+				t.Fatal("GeminiAnalyzer.Analyze().Clean() = true, want false")
+			}
+			if len(got.Findings) != 1 {
+				t.Fatalf("len(GeminiAnalyzer.Analyze().Findings) = %d, want 1", len(got.Findings))
+			}
+			if got.Findings[0].Message != analyzerUnusableResponseMessage {
+				t.Fatalf("finding.Message = %q, want %q", got.Findings[0].Message, analyzerUnusableResponseMessage)
+			}
+			if got.Findings[0].Evidence.Summary != tt.wantEvidence {
+				t.Fatalf("finding.Evidence.Summary = %q, want %q", got.Findings[0].Evidence.Summary, tt.wantEvidence)
+			}
+		})
+	}
+}
+
+// TestScanWithGeminiAnalyzerFailureModes is integration-style: it drives the
+// real GeminiAnalyzer through scanner.Scan with only the model stubbed, so the
+// failure paths are covered the way the CLI hits them and without remote access.
+func TestScanWithGeminiAnalyzerFailureModes(t *testing.T) {
+	cleanRules := []rules.Rule{
+		rules.RuleFunc(func(*skill.Skill) []result.Finding { return nil }),
+	}
+	flaggingRules := []rules.Rule{
+		rules.RuleFunc(func(*skill.Skill) []result.Finding {
+			return []result.Finding{{
+				Source:   result.SourceRule,
+				Category: result.Category("shell"),
+				Severity: result.SeverityError,
+				Message:  "skill references local shell script execution",
+				Evidence: result.Evidence{Summary: "./scripts/racing.sh"},
+			}}
+		}),
+	}
+
+	tests := []struct {
+		name         string
+		apiKey       string
+		generatorErr error
+		responseText string
+		rules        []rules.Rule
+		wantErr      string
+		wantFindings []result.Finding
+	}{
+		{
+			name:    "missing key fails a scan the rules could not decide",
+			apiKey:  "",
+			rules:   cleanRules,
+			wantErr: "missing GEMINI_API_KEY",
+		},
+		{
+			name:   "missing key still reports rule findings",
+			apiKey: "",
+			rules:  flaggingRules,
+			wantFindings: []result.Finding{{
+				Source:   result.SourceRule,
+				Category: result.Category("shell"),
+				Severity: result.SeverityError,
+				Message:  "skill references local shell script execution",
+				Evidence: result.Evidence{Summary: "./scripts/racing.sh"},
+			}},
+		},
+		{
+			name:         "upstream failure fails a scan the rules could not decide",
+			apiKey:       "test-key",
+			generatorErr: errors.New("upstream unavailable"),
+			rules:        cleanRules,
+			wantErr:      "generate analysis: upstream unavailable",
+		},
+		{
+			name:         "upstream failure still reports rule findings",
+			apiKey:       "test-key",
+			generatorErr: errors.New("upstream unavailable"),
+			rules:        flaggingRules,
+			wantFindings: []result.Finding{{
+				Source:   result.SourceRule,
+				Category: result.Category("shell"),
+				Severity: result.SeverityError,
+				Message:  "skill references local shell script execution",
+				Evidence: result.Evidence{Summary: "./scripts/racing.sh"},
+			}},
+		},
+		{
+			name:         "malformed analyzer output is reported rather than read as clean",
+			apiKey:       "test-key",
+			responseText: "looks fine to me",
+			rules:        cleanRules,
+			wantFindings: []result.Finding{{
+				Source:   result.SourceAnalyzer,
+				Category: result.Category("analysis"),
+				Severity: result.SeverityWarning,
+				Message:  analyzerUnusableResponseMessage,
+				Evidence: result.Evidence{Summary: "invalid analyzer JSON"},
+			}},
+		},
+		{
+			name:         "clean flag alongside findings is reported rather than read as clean",
+			apiKey:       "test-key",
+			responseText: `{"clean":true,"findings":[{"category":"mismatch","severity":"warning","message":"m","evidence":"e"}]}`,
+			rules:        cleanRules,
+			wantFindings: []result.Finding{{
+				Source:   result.SourceAnalyzer,
+				Category: result.Category("analysis"),
+				Severity: result.SeverityWarning,
+				Message:  analyzerUnusableResponseMessage,
+				Evidence: result.Evidence{Summary: "clean analyzer response included findings"},
+			}},
+		},
+		{
+			name:         "malformed analyzer output does not mask rule findings",
+			apiKey:       "test-key",
+			responseText: `{"findings":[{"category":"mismatch"}]`,
+			rules:        flaggingRules,
+			wantFindings: []result.Finding{
+				{
+					Source:   result.SourceRule,
+					Category: result.Category("shell"),
+					Severity: result.SeverityError,
+					Message:  "skill references local shell script execution",
+					Evidence: result.Evidence{Summary: "./scripts/racing.sh"},
+				},
+				{
+					Source:   result.SourceAnalyzer,
+					Category: result.Category("analysis"),
+					Severity: result.SeverityWarning,
+					Message:  analyzerUnusableResponseMessage,
+					Evidence: result.Evidence{Summary: "invalid analyzer JSON"},
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("GEMINI_API_KEY", tt.apiKey)
+			stubNewGenerator(t, &stubGenerator{responseText: tt.responseText, err: tt.generatorErr}, nil)
+
+			got, err := scanner.Scanner{Rules: tt.rules, Analyzer: GeminiAnalyzer{}}.Scan(&skill.Skill{
+				Name:        "test skill",
+				Description: "a test skill",
+				Body:        "body",
+			})
+
+			if tt.wantErr != "" {
+				if err == nil {
+					t.Fatalf("Scan() error = nil, want %q", tt.wantErr)
+				}
+				if err.Error() != tt.wantErr {
+					t.Fatalf("Scan() error = %q, want %q", err.Error(), tt.wantErr)
+				}
+
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("Scan() error = %v, want nil", err)
+			}
+			if got.Clean() {
+				t.Fatal("Scan().Clean() = true, want false")
+			}
+			if len(got.Findings) != len(tt.wantFindings) {
+				t.Fatalf("len(Scan().Findings) = %d, want %d", len(got.Findings), len(tt.wantFindings))
+			}
+			for i, want := range tt.wantFindings {
+				if got.Findings[i] != want {
+					t.Fatalf("Scan().Findings[%d] = %+v, want %+v", i, got.Findings[i], want)
+				}
 			}
 		})
 	}
