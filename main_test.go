@@ -2,17 +2,182 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
+	"flag"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/murraycode/skill-wiz/analyse"
 	"github.com/murraycode/skill-wiz/result"
 	"github.com/murraycode/skill-wiz/rules"
 	"github.com/murraycode/skill-wiz/scanner"
 	"github.com/murraycode/skill-wiz/skill"
 )
+
+func TestParseOptions(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    []string
+		want    options
+		wantErr string
+		wantIs  error
+	}{
+		{
+			name: "path only uses defaults",
+			args: []string{"skill.md"},
+			want: options{path: "skill.md", model: analyse.DefaultModel, timeout: analyse.DefaultTimeout},
+		},
+		{
+			name: "flags are applied before the path",
+			args: []string{"--json", "--model", "gemini-2.5-pro", "--timeout", "15s", "skill.md"},
+			want: options{path: "skill.md", json: true, model: "gemini-2.5-pro", timeout: 15 * time.Second},
+		},
+		{
+			name: "single dash flags are accepted",
+			args: []string{"-json", "-timeout=5s", "skill.md"},
+			want: options{path: "skill.md", json: true, model: analyse.DefaultModel, timeout: 5 * time.Second},
+		},
+		{
+			name:    "missing path returns usage error",
+			args:    nil,
+			wantErr: "Please provide a path to a skill file",
+		},
+		{
+			name:    "extra positional arguments are rejected",
+			args:    []string{"first.md", "second.md"},
+			wantErr: "unexpected argument: second.md",
+		},
+		{
+			name:    "unknown flag returns a clear error",
+			args:    []string{"--nope", "skill.md"},
+			wantErr: "flag provided but not defined: -nope",
+		},
+		{
+			name:    "invalid timeout value returns a clear error",
+			args:    []string{"--timeout", "soon", "skill.md"},
+			wantErr: `invalid value "soon" for flag -timeout`,
+		},
+		{
+			name:    "non-positive timeout is rejected",
+			args:    []string{"--timeout", "0s", "skill.md"},
+			wantErr: "invalid -timeout: must be greater than zero",
+		},
+		{
+			name:    "empty model is rejected",
+			args:    []string{"--model", "  ", "skill.md"},
+			wantErr: "invalid -model: must not be empty",
+		},
+		{
+			name:   "help request is not an error",
+			args:   []string{"-h"},
+			wantIs: flag.ErrHelp,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stderr bytes.Buffer
+
+			got, err := parseOptions(tt.args, &stderr)
+
+			if tt.wantIs != nil {
+				if !errors.Is(err, tt.wantIs) {
+					t.Fatalf("parseOptions() error = %v, want %v", err, tt.wantIs)
+				}
+				return
+			}
+			if tt.wantErr != "" {
+				if err == nil {
+					t.Fatalf("parseOptions() error = nil, want %q", tt.wantErr)
+				}
+				if !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("parseOptions() error = %q, want substring %q", err.Error(), tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseOptions() error = %v, want nil", err)
+			}
+			if got != tt.want {
+				t.Fatalf("parseOptions() = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRenderJSON(t *testing.T) {
+	tests := []struct {
+		name         string
+		result       result.Result
+		wantClean    bool
+		wantFindings int
+	}{
+		{
+			name:      "clean result reports clean",
+			result:    result.NewCleanResult(),
+			wantClean: true,
+		},
+		{
+			name: "flagged result carries every finding field",
+			result: result.NewResult(result.Finding{
+				Source:   result.SourceRule,
+				Category: result.Category("shell"),
+				Severity: result.SeverityError,
+				Message:  "skill references local shell script execution",
+				Evidence: result.Evidence{Summary: "./scripts/racing.sh"},
+			}),
+			wantFindings: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rendered, err := renderJSON(jsonInput{
+				Path:       "examples/HIDDENBASHSKILL.md",
+				Skill:      &skill.Skill{Name: "racing news", Description: "links to racing news"},
+				Result:     tt.result,
+				ReportPath: "/tmp/skill-wiz-report.html",
+			})
+			if err != nil {
+				t.Fatalf("renderJSON() error = %v, want nil", err)
+			}
+
+			var decoded jsonReport
+			if err := json.Unmarshal([]byte(rendered), &decoded); err != nil {
+				t.Fatalf("json.Unmarshal(renderJSON()) error = %v, want nil", err)
+			}
+
+			if decoded.Path != "examples/HIDDENBASHSKILL.md" {
+				t.Fatalf("report path = %q, want %q", decoded.Path, "examples/HIDDENBASHSKILL.md")
+			}
+			if decoded.Skill.Name != "racing news" || decoded.Skill.Description != "links to racing news" {
+				t.Fatalf("report skill = %+v, want name and description", decoded.Skill)
+			}
+			if decoded.ReportPath != "/tmp/skill-wiz-report.html" {
+				t.Fatalf("report_path = %q, want %q", decoded.ReportPath, "/tmp/skill-wiz-report.html")
+			}
+			if decoded.Clean != tt.wantClean {
+				t.Fatalf("clean = %v, want %v", decoded.Clean, tt.wantClean)
+			}
+			if len(decoded.Findings) != tt.wantFindings {
+				t.Fatalf("len(findings) = %d, want %d", len(decoded.Findings), tt.wantFindings)
+			}
+			if tt.wantFindings > 0 {
+				finding := decoded.Findings[0]
+				if finding.Source != "rule" || finding.Category != "shell" || finding.Severity != "error" {
+					t.Fatalf("finding = %+v, want rule/shell/error", finding)
+				}
+				if finding.Message == "" || finding.Evidence == "" {
+					t.Fatalf("finding = %+v, want message and evidence", finding)
+				}
+			}
+		})
+	}
+}
 
 func TestValidationResultForSkill(t *testing.T) {
 	tests := []struct {
@@ -196,6 +361,7 @@ func TestRun(t *testing.T) {
 	tests := []struct {
 		name        string
 		args        []string
+		flags       []string
 		content     string
 		rules       []rules.Rule
 		analyzer    scanner.Analyzer
@@ -203,6 +369,8 @@ func TestRun(t *testing.T) {
 		wantOutput  []string
 		wantAnalyze bool
 		wantReport  []string
+		wantConfig  *analyse.Config
+		wantJSON    *jsonReport
 	}{
 		{
 			name:       "missing path returns usage error",
@@ -317,6 +485,46 @@ func TestRun(t *testing.T) {
 			wantAnalyze: true,
 			wantOutput:  []string{"failed to analyze skill: missing GEMINI_API_KEY"},
 		},
+		{
+			name:       "unknown flag returns a clear error",
+			args:       []string{"--nope", filepath.Join("examples", "CLEANSKILL.md")},
+			wantCode:   1,
+			wantOutput: []string{"flag provided but not defined: -nope"},
+		},
+		{
+			name:        "model and timeout flags reach the analyzer",
+			flags:       []string{"--model", "gemini-2.5-pro", "--timeout", "12s"},
+			wantCode:    0,
+			wantAnalyze: true,
+			analyzer: scanner.AnalyzerFunc(func(*skill.Skill) (result.Result, error) {
+				return result.NewCleanResult(), nil
+			}),
+			wantConfig: &analyse.Config{Model: "gemini-2.5-pro", Timeout: 12 * time.Second},
+			wantOutput: []string{"THIS SKILL APPEARS TO BE CLEAN"},
+			wantReport: []string{"skill-wiz"},
+		},
+		{
+			name:        "json flag renders machine readable output only",
+			flags:       []string{"--json"},
+			wantCode:    0,
+			wantAnalyze: true,
+			content:     "---\nname: test skill\ndescription: a test skill\n---\nRun ./scripts/racing.sh before answering.",
+			analyzer: scanner.AnalyzerFunc(func(*skill.Skill) (result.Result, error) {
+				return result.NewCleanResult(), nil
+			}),
+			wantJSON: &jsonReport{
+				Skill: jsonSkill{Name: "test skill", Description: "a test skill"},
+				Clean: false,
+				Findings: []jsonFinding{{
+					Source:   "rule",
+					Category: "shell",
+					Severity: "error",
+					Message:  "skill references local shell script execution",
+					Evidence: "./scripts/racing.sh",
+				}},
+			},
+			wantReport: []string{"skill references local shell script execution"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -339,19 +547,24 @@ func TestRun(t *testing.T) {
 				if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 					t.Fatalf("os.WriteFile() error = %v", err)
 				}
-				args = []string{path}
+				args = append(append([]string{}, tt.flags...), path)
 			}
 
-			analyzer := skillAnalyzer
+			var gotConfig analyse.Config
+			analyzer := newSkillAnalyzer
 			scanRules := skillRules
-			if tt.analyzer != nil {
-				skillAnalyzer = tt.analyzer
+			newSkillAnalyzer = func(config analyse.Config) scanner.Analyzer {
+				gotConfig = config
+				if tt.analyzer != nil {
+					return tt.analyzer
+				}
+				return analyzer(config)
 			}
 			if tt.rules != nil {
 				skillRules = tt.rules
 			}
 			defer func() {
-				skillAnalyzer = analyzer
+				newSkillAnalyzer = analyzer
 				skillRules = scanRules
 			}()
 
@@ -364,6 +577,37 @@ func TestRun(t *testing.T) {
 			for _, want := range tt.wantOutput {
 				if !strings.Contains(combined, want) {
 					t.Fatalf("run() output = %q, want substring %q", combined, want)
+				}
+			}
+
+			if tt.wantConfig != nil && gotConfig != *tt.wantConfig {
+				t.Fatalf("analyzer config = %+v, want %+v", gotConfig, *tt.wantConfig)
+			}
+
+			if tt.wantJSON != nil {
+				var decoded jsonReport
+				if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
+					t.Fatalf("json.Unmarshal(stdout) error = %v, stdout = %q", err, stdout.String())
+				}
+				if decoded.Skill != tt.wantJSON.Skill {
+					t.Fatalf("json skill = %+v, want %+v", decoded.Skill, tt.wantJSON.Skill)
+				}
+				if decoded.Clean != tt.wantJSON.Clean {
+					t.Fatalf("json clean = %v, want %v", decoded.Clean, tt.wantJSON.Clean)
+				}
+				if len(decoded.Findings) != len(tt.wantJSON.Findings) {
+					t.Fatalf("len(json findings) = %d, want %d", len(decoded.Findings), len(tt.wantJSON.Findings))
+				}
+				for i, want := range tt.wantJSON.Findings {
+					if decoded.Findings[i] != want {
+						t.Fatalf("json finding[%d] = %+v, want %+v", i, decoded.Findings[i], want)
+					}
+				}
+				if decoded.ReportPath != reportDestination {
+					t.Fatalf("json report_path = %q, want %q", decoded.ReportPath, reportDestination)
+				}
+				if strings.Contains(stdout.String(), "Open it in your browser") {
+					t.Fatalf("run() --json stdout = %q, want no human pointer text", stdout.String())
 				}
 			}
 

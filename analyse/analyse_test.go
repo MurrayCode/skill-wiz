@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/murraycode/skill-wiz/result"
 	"github.com/murraycode/skill-wiz/skill"
@@ -17,6 +18,8 @@ type stubGenerator struct {
 	prompt       string
 	model        string
 	config       *genai.GenerateContentConfig
+	deadline     time.Duration
+	hasDeadline  bool
 }
 
 func (s *stubGenerator) generate(model string, content []*genai.Content, config *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
@@ -43,7 +46,12 @@ func textFromContents(contents []*genai.Content) string {
 	return text
 }
 
-func (s *stubGenerator) GenerateContent(_ context.Context, model string, content []*genai.Content, config *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
+func (s *stubGenerator) GenerateContent(ctx context.Context, model string, content []*genai.Content, config *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
+	if deadline, ok := ctx.Deadline(); ok {
+		s.hasDeadline = true
+		s.deadline = time.Until(deadline)
+	}
+
 	return s.generate(model, content, config)
 }
 
@@ -343,5 +351,84 @@ func TestResultFromText(t *testing.T) {
 				t.Fatalf("finding.Evidence.Summary = %q, want %q", finding.Evidence.Summary, tt.wantEvidence)
 			}
 		})
+	}
+}
+
+func TestAnalyzeWithConfig(t *testing.T) {
+	tests := []struct {
+		name        string
+		config      Config
+		wantModel   string
+		wantTimeout time.Duration
+	}{
+		{
+			name:        "zero config falls back to defaults",
+			config:      Config{},
+			wantModel:   DefaultModel,
+			wantTimeout: DefaultTimeout,
+		},
+		{
+			name:        "model override reaches the generator",
+			config:      Config{Model: "gemini-2.5-pro"},
+			wantModel:   "gemini-2.5-pro",
+			wantTimeout: DefaultTimeout,
+		},
+		{
+			name:        "timeout override bounds the request context",
+			config:      Config{Timeout: 5 * time.Second},
+			wantModel:   DefaultModel,
+			wantTimeout: 5 * time.Second,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("GEMINI_API_KEY", "test-key")
+			stub := &stubGenerator{responseText: `{"clean": true}`}
+			generator := newGenerator
+			newGenerator = func(context.Context, string) (contentGenerator, error) {
+				return stub, nil
+			}
+			defer func() { newGenerator = generator }()
+
+			got, err := AnalyzeWithConfig("prompt text", tt.config)
+			if err != nil {
+				t.Fatalf("AnalyzeWithConfig() error = %v, want nil", err)
+			}
+			if !got.Clean() {
+				t.Fatalf("AnalyzeWithConfig().Clean() = false, want true")
+			}
+			if stub.model != tt.wantModel {
+				t.Fatalf("generator model = %q, want %q", stub.model, tt.wantModel)
+			}
+			if !stub.hasDeadline {
+				t.Fatal("generator context had no deadline, want one")
+			}
+			if stub.deadline > tt.wantTimeout || stub.deadline < tt.wantTimeout-time.Second {
+				t.Fatalf("generator context deadline = %v, want ~%v", stub.deadline, tt.wantTimeout)
+			}
+		})
+	}
+}
+
+func TestGeminiAnalyzerAnalyzeUsesConfig(t *testing.T) {
+	t.Setenv("GEMINI_API_KEY", "test-key")
+	stub := &stubGenerator{responseText: `{"clean": true}`}
+	generator := newGenerator
+	newGenerator = func(context.Context, string) (contentGenerator, error) {
+		return stub, nil
+	}
+	defer func() { newGenerator = generator }()
+
+	analyzer := GeminiAnalyzer{Config: Config{Model: "gemini-2.5-pro", Timeout: 3 * time.Second}}
+	if _, err := analyzer.Analyze(&skill.Skill{Name: "test skill", Description: "a test skill", Body: "body"}); err != nil {
+		t.Fatalf("GeminiAnalyzer.Analyze() error = %v, want nil", err)
+	}
+
+	if stub.model != "gemini-2.5-pro" {
+		t.Fatalf("generator model = %q, want %q", stub.model, "gemini-2.5-pro")
+	}
+	if !stub.hasDeadline || stub.deadline > 3*time.Second || stub.deadline < 2*time.Second {
+		t.Fatalf("generator context deadline = %v (set = %v), want ~3s", stub.deadline, stub.hasDeadline)
 	}
 }
