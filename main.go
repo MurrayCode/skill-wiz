@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/murraycode/skill-wiz/analyse"
+	"github.com/murraycode/skill-wiz/discover"
 	"github.com/murraycode/skill-wiz/report"
 	"github.com/murraycode/skill-wiz/result"
 	"github.com/murraycode/skill-wiz/rules"
@@ -33,7 +34,7 @@ var reportPath = defaultReportPath
 
 // options is the parsed command line for a single run.
 type options struct {
-	path    string
+	paths   []string
 	json    bool
 	model   string
 	timeout time.Duration
@@ -59,50 +60,97 @@ func run(args []string, stdout io.Writer, stderr io.Writer) int {
 		return 1
 	}
 
-	content, err := os.ReadFile(opts.path)
+	files, err := discover.Files(opts.paths)
 	if err != nil {
-		fmt.Fprintf(stderr, "failed to read file: %v\n", err)
+		fmt.Fprintf(stderr, "failed to collect skill files: %v\n", err)
 		return 1
-	}
-	s, err := skill.Parse(string(content))
-	if err != nil {
-		fmt.Fprintf(stderr, "Failed to parse skill: %v\n", err)
-		return 1
-	}
-	// Validation short-circuits: a skill missing required metadata is never
-	// handed to the rules or the analyzer.
-	output := validationResultForSkill(s)
-	if output.Clean() {
-		output, err = scanner.Scanner{Rules: skillRules, Analyzer: newSkillAnalyzer(opts.analyzerConfig())}.Scan(s)
-		if err != nil {
-			fmt.Fprintf(stderr, "failed to analyze skill: %v\n", err)
-			return 1
-		}
 	}
 
-	destination := writeReport(s, opts.path, output, stderr)
+	analyzer := newSkillAnalyzer(opts.analyzerConfig())
+
+	scans := make([]fileScan, 0, len(files))
+	failed := false
+	for _, file := range files {
+		scan, err := scanFile(file, analyzer)
+		if err != nil {
+			// One unreadable or unparseable file must not hide the rest: report
+			// it, remember the failure for the exit code, and carry on.
+			fmt.Fprintln(stderr, scanError(file, err, len(files)))
+			failed = true
+			continue
+		}
+
+		scans = append(scans, scan)
+	}
+	if len(scans) == 0 {
+		return 1
+	}
+
+	// One run, one report: every scanned skill lands on the same page.
+	destination := writeReport(scans, stderr)
 
 	if opts.json {
-		rendered, err := renderJSON(jsonInput{
-			Path:       opts.path,
-			Skill:      s,
-			Result:     output,
-			ReportPath: destination,
-		})
+		rendered, err := renderJSON(jsonInputs(scans, destination))
 		if err != nil {
 			fmt.Fprintf(stderr, "failed to render JSON output: %v\n", err)
 			return 1
 		}
 
 		fmt.Fprintln(stdout, rendered)
+		if failed {
+			return 1
+		}
 		return 0
 	}
 
-	fmt.Fprint(stdout, renderResult(output))
+	fmt.Fprint(stdout, renderScans(scans, len(files)))
 	if destination != "" {
 		fmt.Fprint(stdout, renderReportPointer(destination))
 	}
+	if failed {
+		return 1
+	}
 	return 0
+}
+
+// fileScan is the outcome of scanning one skill file.
+type fileScan struct {
+	path   string
+	skill  *skill.Skill
+	result result.Result
+}
+
+// scanFile parses and scans a single file. Validation short-circuits: a skill
+// missing required metadata is never handed to the rules or the analyzer.
+func scanFile(path string, analyzer scanner.Analyzer) (fileScan, error) {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return fileScan{}, fmt.Errorf("failed to read file: %w", err)
+	}
+	s, err := skill.Parse(string(content))
+	if err != nil {
+		return fileScan{}, fmt.Errorf("Failed to parse skill: %w", err)
+	}
+
+	output := validationResultForSkill(s)
+	if output.Clean() {
+		output, err = scanner.Scanner{Rules: skillRules, Analyzer: analyzer}.Scan(s)
+		if err != nil {
+			return fileScan{}, fmt.Errorf("failed to analyze skill: %w", err)
+		}
+	}
+
+	return fileScan{path: path, skill: s, result: output}, nil
+}
+
+// scanError names the file only when a run covers more than one, so single-file
+// output stays as terse as it has always been.
+func scanError(path string, err error, total int) string {
+	if total == 1 {
+		return err.Error()
+	}
+
+	return fmt.Sprintf("%s: %v", path, err)
 }
 
 // parseOptions turns raw arguments into options, reporting invalid flags and
@@ -135,13 +183,9 @@ func parseOptions(args []string, stderr io.Writer) (options, error) {
 		printUsage(flags, stderr)
 		return options{}, errors.New("Please provide a path to a skill file")
 	}
-	if len(positional) > 1 {
-		printUsage(flags, stderr)
-		return options{}, fmt.Errorf("unexpected argument: %s", positional[1])
-	}
 
 	return options{
-		path:    positional[0],
+		paths:   positional,
 		json:    *emitJSON,
 		model:   strings.TrimSpace(*model),
 		timeout: *timeout,
@@ -149,30 +193,35 @@ func parseOptions(args []string, stderr io.Writer) (options, error) {
 }
 
 func printUsage(flags *flag.FlagSet, w io.Writer) {
-	fmt.Fprintln(w, "Usage: skill-wiz [flags] <path-to-skill-file>")
+	fmt.Fprintln(w, "Usage: skill-wiz [flags] <path-to-skill-file-or-directory>...")
 	fmt.Fprintln(w, "\nFlags:")
 	flags.SetOutput(w)
 	flags.PrintDefaults()
 	flags.SetOutput(io.Discard)
 }
 
-// writeReport saves the HTML report and returns where it landed, or "" when it
-// could not be written. A report that cannot be written is a warning, not a
-// scan failure: the scan output already carries every finding.
-func writeReport(s *skill.Skill, sourcePath string, scanResult result.Result, stderr io.Writer) string {
+// writeReport saves the run's HTML report and returns where it landed, or ""
+// when it could not be written. A report that cannot be written is a warning,
+// not a scan failure: the console output already carries every finding.
+func writeReport(scans []fileScan, stderr io.Writer) string {
 	destination, err := reportPath()
 	if err != nil {
 		fmt.Fprintf(stderr, "failed to resolve HTML report path: %v\n", err)
 		return ""
 	}
 
-	if err := report.Write(destination, report.Input{
-		SkillName:        s.Name,
-		SkillDescription: s.Description,
-		SourcePath:       sourcePath,
-		GeneratedAt:      time.Now(),
-		Result:           scanResult,
-	}); err != nil {
+	inputs := make([]report.Input, 0, len(scans))
+	for _, scan := range scans {
+		inputs = append(inputs, report.Input{
+			SkillName:        scan.skill.Name,
+			SkillDescription: scan.skill.Description,
+			SourcePath:       scan.path,
+			GeneratedAt:      time.Now(),
+			Result:           scan.result,
+		})
+	}
+
+	if err := report.Write(destination, inputs...); err != nil {
 		fmt.Fprintf(stderr, "failed to write HTML report: %v\n", err)
 		return ""
 	}
@@ -233,7 +282,44 @@ type jsonFinding struct {
 	Evidence string `json:"evidence"`
 }
 
-func renderJSON(input jsonInput) (string, error) {
+// jsonInputs pairs every scan with the one report the run wrote, so a consumer
+// reading a single entry still knows where to look.
+func jsonInputs(scans []fileScan, reportPath string) []jsonInput {
+	inputs := make([]jsonInput, 0, len(scans))
+	for _, scan := range scans {
+		inputs = append(inputs, jsonInput{
+			Path:       scan.path,
+			Skill:      scan.skill,
+			Result:     scan.result,
+			ReportPath: reportPath,
+		})
+	}
+
+	return inputs
+}
+
+// renderJSON encodes the scans. A single scan stays the object it has always
+// been; several scans become an array of that same object.
+func renderJSON(inputs []jsonInput) (string, error) {
+	reports := make([]jsonReport, 0, len(inputs))
+	for _, input := range inputs {
+		reports = append(reports, newJSONReport(input))
+	}
+
+	var payload any = reports
+	if len(reports) == 1 {
+		payload = reports[0]
+	}
+
+	encoded, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("encode JSON result: %w", err)
+	}
+
+	return string(encoded), nil
+}
+
+func newJSONReport(input jsonInput) jsonReport {
 	payload := jsonReport{
 		Path:       input.Path,
 		Clean:      input.Result.Clean(),
@@ -253,12 +339,27 @@ func renderJSON(input jsonInput) (string, error) {
 		})
 	}
 
-	encoded, err := json.MarshalIndent(payload, "", "  ")
-	if err != nil {
-		return "", fmt.Errorf("encode JSON result: %w", err)
+	return payload
+}
+
+// renderScans renders every scan in order. A run over a single file renders
+// exactly as it did before multi-file support; a run over several files heads
+// each result with its path, so findings keep their file even when some of the
+// files failed to scan.
+func renderScans(scans []fileScan, total int) string {
+	var builder strings.Builder
+	for index, scan := range scans {
+		if total > 1 {
+			if index > 0 {
+				builder.WriteString("\n")
+			}
+			fmt.Fprintf(&builder, "=== %s ===\n", scan.path)
+		}
+
+		builder.WriteString(renderResult(scan.result))
 	}
 
-	return string(encoded), nil
+	return builder.String()
 }
 
 func renderResult(scanResult result.Result) string {

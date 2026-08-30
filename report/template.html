@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>skill-wiz report — {{.SkillName}}</title>
+<title>skill-wiz report — {{.Title}}</title>
 <style>
 :root {
   --ink: #08060d;
@@ -66,6 +66,47 @@ body {
   text-transform: uppercase;
   color: var(--muted);
 }
+
+.picker {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+  margin-bottom: 2rem;
+  padding: 0.85rem 1.1rem;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.picker[hidden] { display: none; }
+
+.picker label {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.picker select {
+  flex: 1 1 18rem;
+  min-width: 0;
+  max-width: 100%;
+  padding: 0.45rem 0.6rem;
+  font-family: var(--mono);
+  font-size: 0.82rem;
+  color: var(--text);
+  background: var(--surface-raised);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.picker select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.skill[hidden] { display: none; }
+
+.skill + .skill { margin-top: 3rem; padding-top: 2rem; border-top: 1px solid var(--line-soft); }
 
 .subject { padding-bottom: 2rem; border-bottom: 1px solid var(--line-soft); }
 
@@ -280,55 +321,103 @@ h1 {
       <path d="M16 8.5l1.9 4.4 4.6 1.6-4.6 1.6L16 20.5l-1.9-4.4-4.6-1.6 4.6-1.6Z" fill="url(#sigilFill)"/>
     </svg>
     <span class="wordmark">skill<span>-wiz</span></span>
-    <span class="kicker">Scan report</span>
+      <span class="kicker">{{if .Multiple}}{{.SkillCount}} skills scanned{{else}}Scan report{{end}}</span>
   </header>
 
-  <section class="subject">
-    <h1>{{.SkillName}}</h1>
-    {{if .SkillDescription}}<p class="description">{{.SkillDescription}}</p>{{end}}
-    <div class="meta">
-      <span><b>file</b> <span class="value">{{.SourcePath}}</span></span>
-      <span><b>scanned</b> <span class="value">{{.GeneratedAt}}</span></span>
-      {{if .Sources}}<span><b>checks</b> <span class="value">{{.Sources}}</span></span>{{end}}
-    </div>
-  </section>
-
-  <section class="verdict tone-{{.VerdictTone}}">
-    <span class="verdict-headline">{{.Verdict}}</span>
-    <span class="verdict-detail">{{.VerdictDetail}}</span>
-    {{if .Counts}}
-    <span class="tally">
-      {{range .Counts}}<span class="count severity-{{.Severity}}">{{.Count}} {{.Label}}</span>{{end}}
-    </span>
-    {{end}}
-  </section>
-
-  {{if .Findings}}
-  <h2 class="section-label">Findings</h2>
-  {{range .Findings}}
-  <article class="finding-card severity-{{.Severity}}">
-    <div class="finding-head">
-      <span class="pill">{{.Severity}}</span>
-      <span class="chip">{{.Category}}</span>
-      {{if .Source}}<span class="chip source">{{.Source}}</span>{{end}}
-    </div>
-    <p class="finding-message">{{.Message}}</p>
-    {{if .Evidence}}
-    <div class="evidence">
-      <span class="evidence-label">Evidence</span>
-      <code>{{.Evidence}}</code>
-    </div>
-    {{end}}
-  </article>
-  {{end}}
-  {{else}}
-  <div class="clean-panel">
-    <p>Deterministic rules and the model-assisted analyser both came back empty. That is not a guarantee — read the skill before trusting it.</p>
+  {{if .Multiple}}
+  <div class="picker" id="picker" hidden>
+    <label for="skill-picker">skill</label>
+    <select id="skill-picker">
+      {{range .Skills}}<option value="{{.ID}}">{{.Label}}</option>{{end}}
+    </select>
   </div>
+  {{end}}
+
+  {{range .Skills}}
+  <section class="skill" id="{{.ID}}">
+
+    <div class="subject">
+      <h1>{{.SkillName}}</h1>
+      {{if .SkillDescription}}<p class="description">{{.SkillDescription}}</p>{{end}}
+      <div class="meta">
+        <span><b>file</b> <span class="value">{{.SourcePath}}</span></span>
+        <span><b>scanned</b> <span class="value">{{.GeneratedAt}}</span></span>
+        {{if .Sources}}<span><b>checks</b> <span class="value">{{.Sources}}</span></span>{{end}}
+      </div>
+    </div>
+
+    <div class="verdict tone-{{.VerdictTone}}">
+      <span class="verdict-headline">{{.Verdict}}</span>
+      <span class="verdict-detail">{{.VerdictDetail}}</span>
+      {{if .Counts}}
+      <span class="tally">
+        {{range .Counts}}<span class="count severity-{{.Severity}}">{{.Count}} {{.Label}}</span>{{end}}
+      </span>
+      {{end}}
+    </div>
+
+    {{if .Findings}}
+    <h2 class="section-label">Findings</h2>
+    {{range .Findings}}
+    <article class="finding-card severity-{{.Severity}}">
+      <div class="finding-head">
+        <span class="pill">{{.Severity}}</span>
+        <span class="chip">{{.Category}}</span>
+        {{if .Source}}<span class="chip source">{{.Source}}</span>{{end}}
+      </div>
+      <p class="finding-message">{{.Message}}</p>
+      {{if .Evidence}}
+      <div class="evidence">
+        <span class="evidence-label">Evidence</span>
+        <code>{{.Evidence}}</code>
+      </div>
+      {{end}}
+    </article>
+    {{end}}
+    {{else}}
+    <div class="clean-panel">
+      <p>Deterministic rules and the model-assisted analyser both came back empty. That is not a guarantee — read the skill before trusting it.</p>
+    </div>
+    {{end}}
+
+  </section>
   {{end}}
 
   <p class="footnote">Generated by skill-wiz. Deterministic rules always run; the model layer only enriches them. Treat this report as a review aid, not a verdict.</p>
 
 </div>
+{{if .Multiple}}
+<script>
+(function () {
+  var picker = document.getElementById("skill-picker");
+  var panels = Array.prototype.slice.call(document.querySelectorAll(".skill"));
+  if (!picker || panels.length < 2) {
+    return;
+  }
+
+  function show(id) {
+    panels.forEach(function (panel) {
+      panel.hidden = panel.id !== id;
+    });
+  }
+
+  // The panels are all visible until this runs, so a reader without JavaScript
+  // still gets every skill instead of a dead control and one hidden report.
+  document.getElementById("picker").hidden = false;
+
+  var requested = window.location.hash.slice(1);
+  if (requested && document.getElementById(requested)) {
+    picker.value = requested;
+  }
+
+  picker.addEventListener("change", function () {
+    show(picker.value);
+    history.replaceState(null, "", "#" + picker.value);
+  });
+
+  show(picker.value);
+})();
+</script>
+{{end}}
 </body>
 </html>

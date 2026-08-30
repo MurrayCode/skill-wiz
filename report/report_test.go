@@ -237,3 +237,153 @@ func TestWrite(t *testing.T) {
 		})
 	}
 }
+
+func TestRenderMultipleSkills(t *testing.T) {
+	generatedAt := time.Date(2026, 8, 30, 14, 5, 0, 0, time.UTC)
+
+	got, err := Render(
+		Input{
+			SkillName:   "clean skill",
+			SourcePath:  filepath.Join("examples", "CLEANSKILL.md"),
+			GeneratedAt: generatedAt,
+			Result:      result.NewCleanResult(),
+		},
+		Input{
+			SkillName:   "harmless skill",
+			SourcePath:  filepath.Join("examples", "HIDDENBASHSKILL.md"),
+			GeneratedAt: generatedAt,
+			Result: result.NewResult(result.Finding{
+				Source:   result.SourceRule,
+				Category: result.Category("shell"),
+				Severity: result.SeverityError,
+				Message:  "skill references local shell script execution",
+				Evidence: result.Evidence{Summary: "./scripts/racing.sh"},
+			}),
+		},
+	)
+	if err != nil {
+		t.Fatalf("Render() error = %v, want nil", err)
+	}
+
+	wants := []string{
+		`<select id="skill-picker"`,
+		`<option value="skill-1"`,
+		`<option value="skill-2"`,
+		`id="skill-1"`,
+		`id="skill-2"`,
+		"CLEANSKILL.md — no findings",
+		"HIDDENBASHSKILL.md — 1 finding",
+		"clean skill",
+		"harmless skill",
+		"skill references local shell script execution",
+		"2 skills",
+	}
+	for _, want := range wants {
+		if !strings.Contains(got, want) {
+			t.Fatalf("Render() output missing substring %q", want)
+		}
+	}
+}
+
+func TestRenderSingleSkillHasNoPicker(t *testing.T) {
+	got, err := Render(Input{
+		SkillName:  "only skill",
+		SourcePath: "skill.md",
+		Result:     result.NewCleanResult(),
+	})
+	if err != nil {
+		t.Fatalf("Render() error = %v, want nil", err)
+	}
+
+	for _, notWant := range []string{"skill-picker", "<option"} {
+		if strings.Contains(got, notWant) {
+			t.Fatalf("Render() output contains unwanted substring %q", notWant)
+		}
+	}
+	if !strings.Contains(got, "only skill") {
+		t.Fatalf("Render() output missing the skill name")
+	}
+}
+
+func TestRenderWithoutScans(t *testing.T) {
+	if _, err := Render(); err == nil {
+		t.Fatal("Render() error = nil, want an error for an empty run")
+	}
+}
+
+func TestRenderLabelsDisambiguateSharedFileNames(t *testing.T) {
+	tests := []struct {
+		name  string
+		paths []string
+		wants []string
+	}{
+		{
+			name:  "distinct file names are labelled by file name",
+			paths: []string{filepath.Join("a", "alpha.md"), filepath.Join("b", "beta.md")},
+			wants: []string{"alpha.md — no findings", "beta.md — no findings"},
+		},
+		{
+			name:  "shared file names fall back to the full path",
+			paths: []string{filepath.Join("a", "SKILL.md"), filepath.Join("b", "SKILL.md")},
+			wants: []string{
+				filepath.Join("a", "SKILL.md") + " — no findings",
+				filepath.Join("b", "SKILL.md") + " — no findings",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			inputs := make([]Input, 0, len(tt.paths))
+			for _, path := range tt.paths {
+				inputs = append(inputs, Input{SkillName: "shared", SourcePath: path, Result: result.NewCleanResult()})
+			}
+
+			got, err := Render(inputs...)
+			if err != nil {
+				t.Fatalf("Render() error = %v, want nil", err)
+			}
+
+			for _, want := range tt.wants {
+				if !strings.Contains(got, want) {
+					t.Fatalf("Render() output missing substring %q", want)
+				}
+			}
+		})
+	}
+}
+
+func TestRenderEscapesPickerLabels(t *testing.T) {
+	got, err := Render(
+		Input{SkillName: "first", SourcePath: "first.md", Result: result.NewCleanResult()},
+		Input{SkillName: "second", SourcePath: "</option><script>alert('label')</script>.md", Result: result.NewCleanResult()},
+	)
+	if err != nil {
+		t.Fatalf("Render() error = %v, want nil", err)
+	}
+
+	if strings.Contains(got, "<script>alert('label')</script>") {
+		t.Fatal("Render() output contains an unescaped picker label")
+	}
+}
+
+func TestWriteMultipleSkills(t *testing.T) {
+	destination := filepath.Join(t.TempDir(), "skill-wiz-report.html")
+
+	if err := Write(destination,
+		Input{SkillName: "first skill", SourcePath: "first.md", Result: result.NewCleanResult()},
+		Input{SkillName: "second skill", SourcePath: "second.md", Result: result.NewCleanResult()},
+	); err != nil {
+		t.Fatalf("Write() error = %v, want nil", err)
+	}
+
+	content, err := os.ReadFile(destination)
+	if err != nil {
+		t.Fatalf("os.ReadFile() error = %v, want nil", err)
+	}
+	for _, want := range []string{"first skill", "second skill", "skill-picker"} {
+		if !strings.Contains(string(content), want) {
+			t.Fatalf("Write() content missing substring %q", want)
+		}
+	}
+}
