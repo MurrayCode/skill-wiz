@@ -17,7 +17,9 @@ detections never depend on the model.
 
 - Build: `go build ./...`
 - Vet: `go vet ./...`
-- Run: `go run . <path-to-skill-file>` — e.g. `go run . examples/HIDDENBASHSKILL.md`
+- Run: `go run . [flags] <path-to-skill-file>` — e.g. `go run . examples/HIDDENBASHSKILL.md`.
+  Flags: `--json` (machine-readable output), `--model` (default `gemini-2.5-flash`),
+  `--timeout` (default `1m`).
 - Test all: `go test ./...`
 - Test one package: `go test ./rules/...`
 - Test one case: `go test ./skill/... -run TestParse/valid_skill`
@@ -43,8 +45,10 @@ Data flows one way, and every layer returns findings rather than printing:
   unrelated-URL, and description-mismatch. A rule is anything with
   `Check(*skill.Skill) []result.Finding`; `RuleFunc` adapts plain functions.
 - **`analyse`** wraps Gemini behind the same contract. `GeminiAnalyzer.Analyze(*skill.Skill)` builds
-  the payload and delegates to the package-level `Analyze(prompt string)` — two different `Analyze`s,
-  don't confuse them.
+  the payload and delegates to the package-level `AnalyzeWithConfig(prompt string, Config)` — two
+  different `Analyze`s, don't confuse them. `Config` carries `Model` and `Timeout`; its zero value
+  means `DefaultModel` / `DefaultTimeout`, and the timeout bounds the request context. The older
+  `Analyze(prompt string)` is now just the default-config shorthand.
 - **`scanner`** orchestrates. It owns the `Analyzer` interface
   (`Analyze(*skill.Skill) (result.Result, error)`) and `AnalyzerFunc`, so the LLM is optional and
   swappable.
@@ -52,8 +56,12 @@ Data flows one way, and every layer returns findings rather than printing:
   `report/template.html`. It imports `result` only — it knows nothing about skills or rules. Every
   field goes through `html/template`, which is what keeps hostile skill text from becoming markup;
   don't swap in `text/template` or hand-built string concatenation.
-- **`main.go`** is wiring plus rendering, kept testable: `main` only calls
-  `run(args, stdout, stderr) int`.
+- **`main.go`** is flag parsing, wiring, and rendering, kept testable: `main` only calls
+  `run(args, stdout, stderr) int`. `parseOptions` returns `options` (`path`, `json`, `model`,
+  `timeout`) or an error; it prints usage itself and the flag set is silenced with `io.Discard` so
+  every failure is reported exactly once. `--json` prints `jsonReport` and nothing else — no clean
+  message, no HTML report pointer — so keep that path free of stray stdout writes, and treat the
+  JSON field names as a contract (add fields, don't rename them).
 
 ### Invariants worth knowing before changing things
 
@@ -97,7 +105,8 @@ Keep all four properties if you touch prompt construction.
 Two package-level `var`s exist purely so tests can substitute the model; tests save and restore them:
 
 - `analyse.newGenerator` — returns the `contentGenerator` interface instead of a real `*genai.Client`.
-- `main.skillAnalyzer` — the `scanner.Analyzer` used by `run`.
+- `main.newSkillAnalyzer` — a `func(analyse.Config) scanner.Analyzer` factory, so tests can both swap
+  the analyzer and assert which `--model` / `--timeout` reached it.
 - `main.reportPath` — where the HTML report is written; tests point it at `t.TempDir()` so `run`
   never writes `skill-wiz-report.html` into the repo.
 

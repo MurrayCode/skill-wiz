@@ -7,10 +7,19 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/murraycode/skill-wiz/result"
 	"github.com/murraycode/skill-wiz/skill"
 	"google.golang.org/genai"
+)
+
+const (
+	// DefaultModel is the Gemini model used when a caller does not name one.
+	DefaultModel = "gemini-2.5-flash"
+	// DefaultTimeout bounds a single analysis request when a caller does not
+	// set one, so a hung upstream cannot stall a scan indefinitely.
+	DefaultTimeout = 60 * time.Second
 )
 
 const (
@@ -63,10 +72,41 @@ var newGenerator = func(ctx context.Context, apiKey string) (contentGenerator, e
 	return client.Models, nil
 }
 
-type GeminiAnalyzer struct{}
+// Config carries the runtime knobs a caller can set for an analysis request.
+// The zero value is valid and means "use the defaults".
+type Config struct {
+	Model   string
+	Timeout time.Duration
+}
 
+func (c Config) withDefaults() Config {
+	if strings.TrimSpace(c.Model) == "" {
+		c.Model = DefaultModel
+	}
+	if c.Timeout <= 0 {
+		c.Timeout = DefaultTimeout
+	}
+
+	return c
+}
+
+type GeminiAnalyzer struct {
+	Config Config
+}
+
+// Analyze runs a prompt with the default configuration.
 func Analyze(prompt string) (result.Result, error) {
-	ctx := context.Background()
+	return AnalyzeWithConfig(prompt, Config{})
+}
+
+// AnalyzeWithConfig runs a prompt with caller-supplied model and timeout
+// settings, falling back to the package defaults for anything left unset.
+func AnalyzeWithConfig(prompt string, config Config) (result.Result, error) {
+	config = config.withDefaults()
+
+	ctx, cancel := context.WithTimeout(context.Background(), config.Timeout)
+	defer cancel()
+
 	apiKey := strings.TrimSpace(os.Getenv("GEMINI_API_KEY"))
 	if apiKey == "" {
 		return result.Result{}, errMissingAPIKey
@@ -78,7 +118,7 @@ func Analyze(prompt string) (result.Result, error) {
 	}
 
 	zeroTemperature := float32(0)
-	config := &genai.GenerateContentConfig{
+	generateConfig := &genai.GenerateContentConfig{
 		SystemInstruction: &genai.Content{Parts: []*genai.Part{{Text: analyzerSystemInstruction}}},
 		Temperature:       &zeroTemperature,
 		ResponseMIMEType:  "application/json",
@@ -86,9 +126,9 @@ func Analyze(prompt string) (result.Result, error) {
 
 	response, err := generator.GenerateContent(
 		ctx,
-		"gemini-2.5-flash",
+		config.Model,
 		genai.Text(prompt),
-		config,
+		generateConfig,
 	)
 	if err != nil {
 		return result.Result{}, fmt.Errorf("generate analysis: %w", err)
@@ -97,12 +137,12 @@ func Analyze(prompt string) (result.Result, error) {
 	return resultFromText(response.Text()), nil
 }
 
-func (GeminiAnalyzer) Analyze(s *skill.Skill) (result.Result, error) {
+func (a GeminiAnalyzer) Analyze(s *skill.Skill) (result.Result, error) {
 	if s == nil {
 		return result.Result{}, errors.New("nil skill")
 	}
 
-	return Analyze(promptForSkill(s))
+	return AnalyzeWithConfig(promptForSkill(s), a.Config)
 }
 
 func promptForSkill(s *skill.Skill) string {

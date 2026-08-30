@@ -50,7 +50,7 @@ This tracker records implementation progress for backlog stories in `docs/backlo
 
 | Story | Status | Completed On | Notes |
 | --- | --- | --- | --- |
-| `P4-001-cli-flags.md` | `todo` |  |  |
+| `P4-001-cli-flags.md` | `done` | 2026-08-30 | Added `--json`, `--model`, and `--timeout` flag parsing with clear invalid-value errors, threaded an `analyse.Config` through the analyzer seam, added machine-readable JSON output, and verified `go test ./...`. |
 | `P4-002-multi-file-scanning.md` | `todo` |  |  |
 | `P4-003-exit-codes.md` | `todo` |  |  |
 | `P4-004-human-readable-output.md` | `todo` |  |  |
