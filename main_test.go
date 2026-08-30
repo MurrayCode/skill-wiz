@@ -7,6 +7,7 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -29,27 +30,31 @@ func TestParseOptions(t *testing.T) {
 		{
 			name: "path only uses defaults",
 			args: []string{"skill.md"},
-			want: options{path: "skill.md", model: analyse.DefaultModel, timeout: analyse.DefaultTimeout},
+			want: options{paths: []string{"skill.md"}, model: analyse.DefaultModel, timeout: analyse.DefaultTimeout},
 		},
 		{
 			name: "flags are applied before the path",
 			args: []string{"--json", "--model", "gemini-2.5-pro", "--timeout", "15s", "skill.md"},
-			want: options{path: "skill.md", json: true, model: "gemini-2.5-pro", timeout: 15 * time.Second},
+			want: options{paths: []string{"skill.md"}, json: true, model: "gemini-2.5-pro", timeout: 15 * time.Second},
 		},
 		{
 			name: "single dash flags are accepted",
 			args: []string{"-json", "-timeout=5s", "skill.md"},
-			want: options{path: "skill.md", json: true, model: analyse.DefaultModel, timeout: 5 * time.Second},
+			want: options{paths: []string{"skill.md"}, json: true, model: analyse.DefaultModel, timeout: 5 * time.Second},
+		},
+		{
+			name: "every positional argument becomes a path",
+			args: []string{"first.md", "skills", "second.md"},
+			want: options{
+				paths:   []string{"first.md", "skills", "second.md"},
+				model:   analyse.DefaultModel,
+				timeout: analyse.DefaultTimeout,
+			},
 		},
 		{
 			name:    "missing path returns usage error",
 			args:    nil,
 			wantErr: "Please provide a path to a skill file",
-		},
-		{
-			name:    "extra positional arguments are rejected",
-			args:    []string{"first.md", "second.md"},
-			wantErr: "unexpected argument: second.md",
 		},
 		{
 			name:    "unknown flag returns a clear error",
@@ -102,7 +107,7 @@ func TestParseOptions(t *testing.T) {
 			if err != nil {
 				t.Fatalf("parseOptions() error = %v, want nil", err)
 			}
-			if got != tt.want {
+			if !reflect.DeepEqual(got, tt.want) {
 				t.Fatalf("parseOptions() = %+v, want %+v", got, tt.want)
 			}
 		})
@@ -136,12 +141,12 @@ func TestRenderJSON(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			rendered, err := renderJSON(jsonInput{
+			rendered, err := renderJSON([]jsonInput{{
 				Path:       "examples/HIDDENBASHSKILL.md",
 				Skill:      &skill.Skill{Name: "racing news", Description: "links to racing news"},
 				Result:     tt.result,
 				ReportPath: "/tmp/skill-wiz-report.html",
-			})
+			}})
 			if err != nil {
 				t.Fatalf("renderJSON() error = %v, want nil", err)
 			}
@@ -174,6 +179,172 @@ func TestRenderJSON(t *testing.T) {
 				if finding.Message == "" || finding.Evidence == "" {
 					t.Fatalf("finding = %+v, want message and evidence", finding)
 				}
+			}
+		})
+	}
+}
+
+func TestRenderJSONMultipleFiles(t *testing.T) {
+	rendered, err := renderJSON([]jsonInput{
+		{
+			Path:   "examples/CLEANSKILL.md",
+			Skill:  &skill.Skill{Name: "clean skill", Description: "a clean skill"},
+			Result: result.NewCleanResult(),
+		},
+		{
+			Path:  "examples/HIDDENBASHSKILL.md",
+			Skill: &skill.Skill{Name: "harmless skill", Description: "racing information"},
+			Result: result.NewResult(result.Finding{
+				Source:   result.SourceRule,
+				Category: result.Category("shell"),
+				Severity: result.SeverityError,
+				Message:  "skill references local shell script execution",
+				Evidence: result.Evidence{Summary: "./scripts/racing.sh"},
+			}),
+			ReportPath: "/tmp/skill-wiz-report-2-hiddenbashskill.html",
+		},
+	})
+	if err != nil {
+		t.Fatalf("renderJSON() error = %v, want nil", err)
+	}
+
+	var decoded []jsonReport
+	if err := json.Unmarshal([]byte(rendered), &decoded); err != nil {
+		t.Fatalf("json.Unmarshal(renderJSON()) error = %v, rendered = %q", err, rendered)
+	}
+
+	if len(decoded) != 2 {
+		t.Fatalf("len(reports) = %d, want 2", len(decoded))
+	}
+	if decoded[0].Path != "examples/CLEANSKILL.md" || !decoded[0].Clean {
+		t.Fatalf("report[0] = %+v, want the clean skill", decoded[0])
+	}
+	if decoded[1].Path != "examples/HIDDENBASHSKILL.md" || decoded[1].Clean {
+		t.Fatalf("report[1] = %+v, want the flagged skill", decoded[1])
+	}
+	if len(decoded[1].Findings) != 1 {
+		t.Fatalf("len(report[1].findings) = %d, want 1", len(decoded[1].Findings))
+	}
+	if decoded[1].ReportPath != "/tmp/skill-wiz-report-2-hiddenbashskill.html" {
+		t.Fatalf("report[1].report_path = %q, want the per-file report", decoded[1].ReportPath)
+	}
+}
+
+func TestRenderScans(t *testing.T) {
+	clean := fileScan{
+		path:       filepath.Join("examples", "CLEANSKILL.md"),
+		result:     result.NewCleanResult(),
+		reportPath: filepath.Join("reports", "skill-wiz-report-1-cleanskill.html"),
+	}
+	flagged := fileScan{
+		path: filepath.Join("examples", "HIDDENBASHSKILL.md"),
+		result: result.NewResult(result.Finding{
+			Source:   result.SourceRule,
+			Category: result.Category("shell"),
+			Severity: result.SeverityError,
+			Message:  "skill references local shell script execution",
+			Evidence: result.Evidence{Summary: "./scripts/racing.sh"},
+		}),
+	}
+
+	tests := []struct {
+		name        string
+		scans       []fileScan
+		total       int
+		wants       []string
+		wantMissing []string
+	}{
+		{
+			name:  "a single file is rendered without a path header",
+			scans: []fileScan{clean},
+			total: 1,
+			wants: []string{
+				"THIS SKILL APPEARS TO BE CLEAN",
+				"HTML report: " + clean.reportPath,
+			},
+			wantMissing: []string{"==="},
+		},
+		{
+			name:  "several files are headed by their path",
+			scans: []fileScan{clean, flagged},
+			total: 2,
+			wants: []string{
+				"=== " + clean.path + " ===",
+				"THIS SKILL APPEARS TO BE CLEAN",
+				"=== " + flagged.path + " ===",
+				"[error] shell (rule): skill references local shell script execution",
+			},
+		},
+		{
+			name:  "a surviving scan keeps its path when another file failed",
+			scans: []fileScan{flagged},
+			total: 2,
+			wants: []string{"=== " + flagged.path + " ==="},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := renderScans(tt.scans, tt.total)
+
+			for _, want := range tt.wants {
+				if !strings.Contains(got, want) {
+					t.Fatalf("renderScans() = %q, want substring %q", got, want)
+				}
+			}
+			for _, missing := range tt.wantMissing {
+				if strings.Contains(got, missing) {
+					t.Fatalf("renderScans() = %q, want no substring %q", got, missing)
+				}
+			}
+		})
+	}
+}
+
+func TestReportDestination(t *testing.T) {
+	base := filepath.Join("reports", "skill-wiz-report.html")
+
+	tests := []struct {
+		name       string
+		sourcePath string
+		index      int
+		total      int
+		want       string
+	}{
+		{
+			name:       "single scan keeps the base destination",
+			sourcePath: filepath.Join("examples", "CLEANSKILL.md"),
+			total:      1,
+			want:       base,
+		},
+		{
+			name:       "multiple scans get a per-file destination",
+			sourcePath: filepath.Join("examples", "CLEANSKILL.md"),
+			index:      0,
+			total:      2,
+			want:       filepath.Join("reports", "skill-wiz-report-1-cleanskill.html"),
+		},
+		{
+			name:       "position keeps same-named files apart",
+			sourcePath: filepath.Join("nested", "SKILL.md"),
+			index:      4,
+			total:      9,
+			want:       filepath.Join("reports", "skill-wiz-report-5-skill.html"),
+		},
+		{
+			name:       "punctuation is reduced to single separators",
+			sourcePath: filepath.Join("examples", "my weird.skill!.md"),
+			index:      1,
+			total:      2,
+			want:       filepath.Join("reports", "skill-wiz-report-2-my-weird-skill.html"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := reportDestination(base, tt.sourcePath, tt.index, tt.total)
+			if got != tt.want {
+				t.Fatalf("reportDestination() = %q, want %q", got, tt.want)
 			}
 		})
 	}
@@ -687,4 +858,222 @@ func TestRun(t *testing.T) {
 			}
 		})
 	}
+}
+
+type skillFile struct {
+	name    string
+	content string
+}
+
+func TestRunMultipleFiles(t *testing.T) {
+	clean := readFixture(t, filepath.Join("examples", "CLEANSKILL.md"))
+	hidden := readFixture(t, filepath.Join("examples", "HIDDENBASHSKILL.md"))
+
+	tests := []struct {
+		name            string
+		files           []skillFile
+		scanDirectory   bool
+		flags           []string
+		wantCode        int
+		wantHeaders     []string
+		wantStdout      []string
+		wantStderr      []string
+		wantMissing     []string
+		wantReportFiles []string
+		wantJSONFiles   []string
+	}{
+		{
+			name: "explicit files are scanned and reported per file",
+			files: []skillFile{
+				{name: "CLEANSKILL.md", content: clean},
+				{name: "HIDDENBASHSKILL.md", content: hidden},
+			},
+			wantCode:    0,
+			wantHeaders: []string{"CLEANSKILL.md", "HIDDENBASHSKILL.md"},
+			wantStdout: []string{
+				"THIS SKILL APPEARS TO BE CLEAN",
+				"[error] shell (rule): skill references local shell script execution",
+				"Evidence: ./scripts/racing.sh",
+			},
+			wantReportFiles: []string{
+				"skill-wiz-report-1-cleanskill.html",
+				"skill-wiz-report-2-hiddenbashskill.html",
+			},
+		},
+		{
+			name: "a directory is walked for skill files",
+			files: []skillFile{
+				{name: "CLEANSKILL.md", content: clean},
+				{name: "HIDDENBASHSKILL.md", content: hidden},
+				{name: "notes.txt", content: "not a skill"},
+			},
+			scanDirectory: true,
+			wantCode:      0,
+			wantHeaders:   []string{"CLEANSKILL.md", "HIDDENBASHSKILL.md"},
+			wantMissing:   []string{"notes.txt"},
+			wantReportFiles: []string{
+				"skill-wiz-report-1-cleanskill.html",
+				"skill-wiz-report-2-hiddenbashskill.html",
+			},
+		},
+		{
+			name: "an unparseable file does not stop the remaining files",
+			files: []skillFile{
+				{name: "CLEANSKILL.md", content: clean},
+				{name: "broken.md", content: "no frontmatter here"},
+			},
+			scanDirectory: true,
+			wantCode:      1,
+			wantHeaders:   []string{"CLEANSKILL.md"},
+			wantStdout:    []string{"THIS SKILL APPEARS TO BE CLEAN"},
+			wantStderr: []string{
+				"broken.md",
+				"invalid skill format",
+			},
+			wantReportFiles: []string{"skill-wiz-report-1-cleanskill.html"},
+		},
+		{
+			name: "json mode emits one report per file",
+			files: []skillFile{
+				{name: "CLEANSKILL.md", content: clean},
+				{name: "HIDDENBASHSKILL.md", content: hidden},
+			},
+			scanDirectory: true,
+			flags:         []string{"--json"},
+			wantCode:      0,
+			wantJSONFiles: []string{"CLEANSKILL.md", "HIDDENBASHSKILL.md"},
+			wantMissing:   []string{"Open it in your browser"},
+			wantReportFiles: []string{
+				"skill-wiz-report-1-cleanskill.html",
+				"skill-wiz-report-2-hiddenbashskill.html",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+
+			directory := t.TempDir()
+			paths := make([]string, 0, len(tt.files))
+			for _, file := range tt.files {
+				path := filepath.Join(directory, file.name)
+				if err := os.WriteFile(path, []byte(file.content), 0o644); err != nil {
+					t.Fatalf("os.WriteFile() error = %v", err)
+				}
+				if strings.HasSuffix(file.name, ".md") {
+					paths = append(paths, path)
+				}
+			}
+
+			reportDirectory := t.TempDir()
+			originalReportPath := reportPath
+			reportPath = func() (string, error) {
+				return filepath.Join(reportDirectory, "skill-wiz-report.html"), nil
+			}
+			originalAnalyzer := newSkillAnalyzer
+			newSkillAnalyzer = func(analyse.Config) scanner.Analyzer {
+				return scanner.AnalyzerFunc(func(*skill.Skill) (result.Result, error) {
+					return result.NewCleanResult(), nil
+				})
+			}
+			defer func() {
+				reportPath = originalReportPath
+				newSkillAnalyzer = originalAnalyzer
+			}()
+
+			args := append([]string{}, tt.flags...)
+			if tt.scanDirectory {
+				args = append(args, directory)
+			} else {
+				args = append(args, paths...)
+			}
+
+			gotCode := run(args, &stdout, &stderr)
+			if gotCode != tt.wantCode {
+				t.Fatalf("run() code = %d, want %d (stderr = %q)", gotCode, tt.wantCode, stderr.String())
+			}
+
+			for _, header := range tt.wantHeaders {
+				want := "=== " + filepath.Join(directory, header) + " ==="
+				if !strings.Contains(stdout.String(), want) {
+					t.Fatalf("run() stdout = %q, want substring %q", stdout.String(), want)
+				}
+			}
+			for _, want := range tt.wantStdout {
+				if !strings.Contains(stdout.String(), want) {
+					t.Fatalf("run() stdout = %q, want substring %q", stdout.String(), want)
+				}
+			}
+			for _, want := range tt.wantStderr {
+				if !strings.Contains(stderr.String(), want) {
+					t.Fatalf("run() stderr = %q, want substring %q", stderr.String(), want)
+				}
+			}
+			for _, missing := range tt.wantMissing {
+				if strings.Contains(stdout.String(), missing) {
+					t.Fatalf("run() stdout = %q, want no substring %q", stdout.String(), missing)
+				}
+			}
+
+			if tt.wantJSONFiles != nil {
+				var decoded []jsonReport
+				if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
+					t.Fatalf("json.Unmarshal(stdout) error = %v, stdout = %q", err, stdout.String())
+				}
+				if len(decoded) != len(tt.wantJSONFiles) {
+					t.Fatalf("len(json reports) = %d, want %d", len(decoded), len(tt.wantJSONFiles))
+				}
+				for i, want := range tt.wantJSONFiles {
+					if decoded[i].Path != filepath.Join(directory, want) {
+						t.Fatalf("json report[%d].path = %q, want %q", i, decoded[i].Path, filepath.Join(directory, want))
+					}
+					if decoded[i].ReportPath == "" {
+						t.Fatalf("json report[%d].report_path is empty, want a per-file report", i)
+					}
+				}
+			}
+
+			entries, err := os.ReadDir(reportDirectory)
+			if err != nil {
+				t.Fatalf("os.ReadDir(reports) error = %v", err)
+			}
+			got := make([]string, 0, len(entries))
+			for _, entry := range entries {
+				got = append(got, entry.Name())
+			}
+			if !reflect.DeepEqual(got, tt.wantReportFiles) {
+				t.Fatalf("report files = %v, want %v", got, tt.wantReportFiles)
+			}
+		})
+	}
+}
+
+func TestRunReportsAnUnknownPath(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	missing := filepath.Join(t.TempDir(), "nope.md")
+
+	if got := run([]string{missing}, &stdout, &stderr); got != 1 {
+		t.Fatalf("run() code = %d, want 1", got)
+	}
+	if !strings.Contains(stderr.String(), missing) {
+		t.Fatalf("run() stderr = %q, want the missing path", stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("run() stdout = %q, want empty", stdout.String())
+	}
+}
+
+func readFixture(t *testing.T, path string) string {
+	t.Helper()
+
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("os.ReadFile(%s) error = %v", path, err)
+	}
+
+	return string(content)
 }

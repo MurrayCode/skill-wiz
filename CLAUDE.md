@@ -17,9 +17,9 @@ detections never depend on the model.
 
 - Build: `go build ./...`
 - Vet: `go vet ./...`
-- Run: `go run . [flags] <path-to-skill-file>` — e.g. `go run . examples/HIDDENBASHSKILL.md`.
-  Flags: `--json` (machine-readable output), `--model` (default `gemini-2.5-flash`),
-  `--timeout` (default `1m`).
+- Run: `go run . [flags] <path-to-skill-file-or-directory>...` — e.g.
+  `go run . examples/HIDDENBASHSKILL.md` or `go run . examples`. Flags: `--json` (machine-readable
+  output), `--model` (default `gemini-2.5-flash`), `--timeout` (default `1m`).
 - Test all: `go test ./...`
 - Test one package: `go test ./rules/...`
 - Test one case: `go test ./skill/... -run TestParse/valid_skill`
@@ -32,7 +32,7 @@ seam. Keep it that way when adding tests.
 
 Data flows one way, and every layer returns findings rather than printing:
 
-`main.run` → `skill.Parse` → `Skill.Validate` → `scanner.Scan` → (`rules.Scan` + `analyse.GeminiAnalyzer`) → `result.Merge` → `main.renderResult` + `report.Write`
+`main.run` → `discover.Files` → per file: `main.scanFile` (`skill.Parse` → `Skill.Validate` → `scanner.Scan` → (`rules.Scan` + `analyse.GeminiAnalyzer`) → `result.Merge`) → `main.renderScans` + `report.Write`
 
 - **`result`** is the leaf package and the common currency. `Finding` carries `Source`
   (`validation` | `rule` | `analyzer`), `Category`, `Severity`, `Message`, `Evidence`; `Result` wraps
@@ -52,23 +52,34 @@ Data flows one way, and every layer returns findings rather than printing:
 - **`scanner`** orchestrates. It owns the `Analyzer` interface
   (`Analyze(*skill.Skill) (result.Result, error)`) and `AnalyzerFunc`, so the LLM is optional and
   swappable.
+- **`discover`** expands the CLI paths into files to scan. A named file is taken as given whatever
+  its extension; a directory is walked for `.md` files, skipping hidden entries so `.git` never
+  reaches the scanner. Explicit paths keep argument order, directory matches are sorted, duplicates
+  collapse, and an empty expansion is `ErrNoSkillFiles`. It knows nothing about skill content.
 - **`report`** renders a `result.Result` into a self-contained HTML page from the embedded
   `report/template.html`. It imports `result` only — it knows nothing about skills or rules. Every
   field goes through `html/template`, which is what keeps hostile skill text from becoming markup;
   don't swap in `text/template` or hand-built string concatenation.
 - **`main.go`** is flag parsing, wiring, and rendering, kept testable: `main` only calls
-  `run(args, stdout, stderr) int`. `parseOptions` returns `options` (`path`, `json`, `model`,
+  `run(args, stdout, stderr) int`. `parseOptions` returns `options` (`paths`, `json`, `model`,
   `timeout`) or an error; it prints usage itself and the flag set is silenced with `io.Discard` so
-  every failure is reported exactly once. `--json` prints `jsonReport` and nothing else — no clean
-  message, no HTML report pointer — so keep that path free of stray stdout writes, and treat the
-  JSON field names as a contract (add fields, don't rename them).
+  every failure is reported exactly once. `run` scans each discovered file through `scanFile` into a
+  `fileScan` (`path`, `skill`, `result`, `reportPath`), then renders them together. `--json` prints
+  the JSON and nothing else — no clean message, no HTML report pointer — so keep that path free of
+  stray stdout writes, and treat the JSON field names as a contract (add fields, don't rename them).
 
 ### Invariants worth knowing before changing things
 
-- **Validation short-circuits.** If `Validate` fails, `run` renders those findings and returns
-  *without* running rules or the LLM (`main.go:40`).
-- **Findings do not yet affect the exit code.** `run` returns 1 only for usage/read/parse/scan
-  *errors*; a flagged skill still exits 0. That is story `P4-003-exit-codes`, still `todo` — don't
+- **Validation short-circuits.** If `Validate` fails, `scanFile` returns those findings *without*
+  running rules or the LLM.
+- **One bad file never hides the rest.** A read, parse, or analysis failure is reported on stderr and
+  the run continues with the remaining files; only a run where *every* file failed prints nothing.
+- **Single-file output is unchanged by multi-file support.** One file still renders with no path
+  header, writes `skill-wiz-report.html`, and emits a single JSON *object*. More than one file heads
+  each result with `=== <path> ===`, writes `skill-wiz-report-<n>-<slug>.html` per file (numbered so
+  same-named skills cannot overwrite each other), and emits a JSON *array* of the same object.
+- **Findings do not yet affect the exit code.** `run` returns 1 only for usage/discovery/read/parse/
+  scan *errors*; a flagged skill still exits 0. That is story `P4-003-exit-codes`, still `todo` — don't
   "fix" it incidentally.
 - **The scanner degrades rather than fails.** If the analyzer errors but rules already found
   something, `Scan` returns the rule findings and swallows the error; it propagates the error only
