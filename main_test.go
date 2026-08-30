@@ -201,7 +201,7 @@ func TestRenderJSONMultipleFiles(t *testing.T) {
 				Message:  "skill references local shell script execution",
 				Evidence: result.Evidence{Summary: "./scripts/racing.sh"},
 			}),
-			ReportPath: "/tmp/skill-wiz-report-2-hiddenbashskill.html",
+			ReportPath: "/tmp/skill-wiz-report.html",
 		},
 	})
 	if err != nil {
@@ -225,16 +225,15 @@ func TestRenderJSONMultipleFiles(t *testing.T) {
 	if len(decoded[1].Findings) != 1 {
 		t.Fatalf("len(report[1].findings) = %d, want 1", len(decoded[1].Findings))
 	}
-	if decoded[1].ReportPath != "/tmp/skill-wiz-report-2-hiddenbashskill.html" {
-		t.Fatalf("report[1].report_path = %q, want the per-file report", decoded[1].ReportPath)
+	if decoded[1].ReportPath != "/tmp/skill-wiz-report.html" {
+		t.Fatalf("report[1].report_path = %q, want the run report", decoded[1].ReportPath)
 	}
 }
 
 func TestRenderScans(t *testing.T) {
 	clean := fileScan{
-		path:       filepath.Join("examples", "CLEANSKILL.md"),
-		result:     result.NewCleanResult(),
-		reportPath: filepath.Join("reports", "skill-wiz-report-1-cleanskill.html"),
+		path:   filepath.Join("examples", "CLEANSKILL.md"),
+		result: result.NewCleanResult(),
 	}
 	flagged := fileScan{
 		path: filepath.Join("examples", "HIDDENBASHSKILL.md"),
@@ -255,14 +254,11 @@ func TestRenderScans(t *testing.T) {
 		wantMissing []string
 	}{
 		{
-			name:  "a single file is rendered without a path header",
-			scans: []fileScan{clean},
-			total: 1,
-			wants: []string{
-				"THIS SKILL APPEARS TO BE CLEAN",
-				"HTML report: " + clean.reportPath,
-			},
-			wantMissing: []string{"==="},
+			name:        "a single file is rendered without a path header",
+			scans:       []fileScan{clean},
+			total:       1,
+			wants:       []string{"THIS SKILL APPEARS TO BE CLEAN"},
+			wantMissing: []string{"===", "HTML report:"},
 		},
 		{
 			name:  "several files are headed by their path",
@@ -296,55 +292,6 @@ func TestRenderScans(t *testing.T) {
 				if strings.Contains(got, missing) {
 					t.Fatalf("renderScans() = %q, want no substring %q", got, missing)
 				}
-			}
-		})
-	}
-}
-
-func TestReportDestination(t *testing.T) {
-	base := filepath.Join("reports", "skill-wiz-report.html")
-
-	tests := []struct {
-		name       string
-		sourcePath string
-		index      int
-		total      int
-		want       string
-	}{
-		{
-			name:       "single scan keeps the base destination",
-			sourcePath: filepath.Join("examples", "CLEANSKILL.md"),
-			total:      1,
-			want:       base,
-		},
-		{
-			name:       "multiple scans get a per-file destination",
-			sourcePath: filepath.Join("examples", "CLEANSKILL.md"),
-			index:      0,
-			total:      2,
-			want:       filepath.Join("reports", "skill-wiz-report-1-cleanskill.html"),
-		},
-		{
-			name:       "position keeps same-named files apart",
-			sourcePath: filepath.Join("nested", "SKILL.md"),
-			index:      4,
-			total:      9,
-			want:       filepath.Join("reports", "skill-wiz-report-5-skill.html"),
-		},
-		{
-			name:       "punctuation is reduced to single separators",
-			sourcePath: filepath.Join("examples", "my weird.skill!.md"),
-			index:      1,
-			total:      2,
-			want:       filepath.Join("reports", "skill-wiz-report-2-my-weird-skill.html"),
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := reportDestination(base, tt.sourcePath, tt.index, tt.total)
-			if got != tt.want {
-				t.Fatalf("reportDestination() = %q, want %q", got, tt.want)
 			}
 		})
 	}
@@ -870,17 +817,18 @@ func TestRunMultipleFiles(t *testing.T) {
 	hidden := readFixture(t, filepath.Join("examples", "HIDDENBASHSKILL.md"))
 
 	tests := []struct {
-		name            string
-		files           []skillFile
-		scanDirectory   bool
-		flags           []string
-		wantCode        int
-		wantHeaders     []string
-		wantStdout      []string
-		wantStderr      []string
-		wantMissing     []string
-		wantReportFiles []string
-		wantJSONFiles   []string
+		name              string
+		files             []skillFile
+		scanDirectory     bool
+		flags             []string
+		wantCode          int
+		wantHeaders       []string
+		wantStdout        []string
+		wantStderr        []string
+		wantMissing       []string
+		wantReportFiles   []string
+		wantReportContent []string
+		wantJSONFiles     []string
 	}{
 		{
 			name: "explicit files are scanned and reported per file",
@@ -895,10 +843,8 @@ func TestRunMultipleFiles(t *testing.T) {
 				"[error] shell (rule): skill references local shell script execution",
 				"Evidence: ./scripts/racing.sh",
 			},
-			wantReportFiles: []string{
-				"skill-wiz-report-1-cleanskill.html",
-				"skill-wiz-report-2-hiddenbashskill.html",
-			},
+			wantReportFiles:   []string{"skill-wiz-report.html"},
+			wantReportContent: []string{"example skill", "harmless skill", "skill-picker", "CLEANSKILL.md", "HIDDENBASHSKILL.md"},
 		},
 		{
 			name: "a directory is walked for skill files",
@@ -907,14 +853,12 @@ func TestRunMultipleFiles(t *testing.T) {
 				{name: "HIDDENBASHSKILL.md", content: hidden},
 				{name: "notes.txt", content: "not a skill"},
 			},
-			scanDirectory: true,
-			wantCode:      0,
-			wantHeaders:   []string{"CLEANSKILL.md", "HIDDENBASHSKILL.md"},
-			wantMissing:   []string{"notes.txt"},
-			wantReportFiles: []string{
-				"skill-wiz-report-1-cleanskill.html",
-				"skill-wiz-report-2-hiddenbashskill.html",
-			},
+			scanDirectory:     true,
+			wantCode:          0,
+			wantHeaders:       []string{"CLEANSKILL.md", "HIDDENBASHSKILL.md"},
+			wantMissing:       []string{"notes.txt"},
+			wantReportFiles:   []string{"skill-wiz-report.html"},
+			wantReportContent: []string{"example skill", "harmless skill", "skill-picker", "CLEANSKILL.md", "HIDDENBASHSKILL.md"},
 		},
 		{
 			name: "an unparseable file does not stop the remaining files",
@@ -930,7 +874,8 @@ func TestRunMultipleFiles(t *testing.T) {
 				"broken.md",
 				"invalid skill format",
 			},
-			wantReportFiles: []string{"skill-wiz-report-1-cleanskill.html"},
+			wantReportFiles:   []string{"skill-wiz-report.html"},
+			wantReportContent: []string{"example skill"},
 		},
 		{
 			name: "json mode emits one report per file",
@@ -938,15 +883,13 @@ func TestRunMultipleFiles(t *testing.T) {
 				{name: "CLEANSKILL.md", content: clean},
 				{name: "HIDDENBASHSKILL.md", content: hidden},
 			},
-			scanDirectory: true,
-			flags:         []string{"--json"},
-			wantCode:      0,
-			wantJSONFiles: []string{"CLEANSKILL.md", "HIDDENBASHSKILL.md"},
-			wantMissing:   []string{"Open it in your browser"},
-			wantReportFiles: []string{
-				"skill-wiz-report-1-cleanskill.html",
-				"skill-wiz-report-2-hiddenbashskill.html",
-			},
+			scanDirectory:     true,
+			flags:             []string{"--json"},
+			wantCode:          0,
+			wantJSONFiles:     []string{"CLEANSKILL.md", "HIDDENBASHSKILL.md"},
+			wantMissing:       []string{"Open it in your browser"},
+			wantReportFiles:   []string{"skill-wiz-report.html"},
+			wantReportContent: []string{"example skill", "harmless skill", "skill-picker", "CLEANSKILL.md", "HIDDENBASHSKILL.md"},
 		},
 	}
 
@@ -1029,8 +972,8 @@ func TestRunMultipleFiles(t *testing.T) {
 					if decoded[i].Path != filepath.Join(directory, want) {
 						t.Fatalf("json report[%d].path = %q, want %q", i, decoded[i].Path, filepath.Join(directory, want))
 					}
-					if decoded[i].ReportPath == "" {
-						t.Fatalf("json report[%d].report_path is empty, want a per-file report", i)
+					if decoded[i].ReportPath != filepath.Join(reportDirectory, "skill-wiz-report.html") {
+						t.Fatalf("json report[%d].report_path = %q, want the run report", i, decoded[i].ReportPath)
 					}
 				}
 			}
@@ -1045,6 +988,18 @@ func TestRunMultipleFiles(t *testing.T) {
 			}
 			if !reflect.DeepEqual(got, tt.wantReportFiles) {
 				t.Fatalf("report files = %v, want %v", got, tt.wantReportFiles)
+			}
+
+			if len(tt.wantReportContent) > 0 {
+				content, err := os.ReadFile(filepath.Join(reportDirectory, tt.wantReportFiles[0]))
+				if err != nil {
+					t.Fatalf("os.ReadFile(report) error = %v, want nil", err)
+				}
+				for _, want := range tt.wantReportContent {
+					if !strings.Contains(string(content), want) {
+						t.Fatalf("run() report missing substring %q", want)
+					}
+				}
 			}
 		})
 	}

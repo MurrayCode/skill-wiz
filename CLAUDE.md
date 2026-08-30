@@ -56,15 +56,17 @@ Data flows one way, and every layer returns findings rather than printing:
   its extension; a directory is walked for `.md` files, skipping hidden entries so `.git` never
   reaches the scanner. Explicit paths keep argument order, directory matches are sorted, duplicates
   collapse, and an empty expansion is `ErrNoSkillFiles`. It knows nothing about skill content.
-- **`report`** renders a `result.Result` into a self-contained HTML page from the embedded
-  `report/template.html`. It imports `result` only — it knows nothing about skills or rules. Every
-  field goes through `html/template`, which is what keeps hostile skill text from becoming markup;
-  don't swap in `text/template` or hand-built string concatenation.
+- **`report`** renders a run into one self-contained HTML page from the embedded
+  `report/template.html`. `Render`/`Write` are variadic over `Input` (one per scanned skill): a single
+  skill renders exactly as before, several render as stacked `.skill` sections plus a `<select>`
+  picker. It imports `result` only — it knows nothing about skills or rules. Every field goes through
+  `html/template`, which is what keeps hostile skill text from becoming markup; don't swap in
+  `text/template` or hand-built string concatenation.
 - **`main.go`** is flag parsing, wiring, and rendering, kept testable: `main` only calls
   `run(args, stdout, stderr) int`. `parseOptions` returns `options` (`paths`, `json`, `model`,
   `timeout`) or an error; it prints usage itself and the flag set is silenced with `io.Discard` so
   every failure is reported exactly once. `run` scans each discovered file through `scanFile` into a
-  `fileScan` (`path`, `skill`, `result`, `reportPath`), then renders them together. `--json` prints
+  `fileScan` (`path`, `skill`, `result`), writes the one report, then renders them together. `--json` prints
   the JSON and nothing else — no clean message, no HTML report pointer — so keep that path free of
   stray stdout writes, and treat the JSON field names as a contract (add fields, don't rename them).
 
@@ -75,9 +77,15 @@ Data flows one way, and every layer returns findings rather than printing:
 - **One bad file never hides the rest.** A read, parse, or analysis failure is reported on stderr and
   the run continues with the remaining files; only a run where *every* file failed prints nothing.
 - **Single-file output is unchanged by multi-file support.** One file still renders with no path
-  header, writes `skill-wiz-report.html`, and emits a single JSON *object*. More than one file heads
-  each result with `=== <path> ===`, writes `skill-wiz-report-<n>-<slug>.html` per file (numbered so
-  same-named skills cannot overwrite each other), and emits a JSON *array* of the same object.
+  header and emits a single JSON *object*. More than one file heads each result with `=== <path> ===`
+  and emits a JSON *array* of the same object.
+- **One run, one report.** However many files a run covers, `writeReport` writes a single
+  `skill-wiz-report.html` and the console prints one pointer to it; every JSON entry carries that same
+  `report_path`. The page holds every scanned skill and the reader picks between them.
+- **The report picker is progressive enhancement.** Every `.skill` section renders visible and the
+  `<select>` is `hidden`; the inline script unhides the picker and hides the other sections. Without
+  JavaScript a reader still sees every skill rather than one panel and a dead control — keep that
+  order if you touch the script.
 - **Findings do not yet affect the exit code.** `run` returns 1 only for usage/discovery/read/parse/
   scan *errors*; a flagged skill still exits 0. That is story `P4-003-exit-codes`, still `todo` — don't
   "fix" it incidentally.

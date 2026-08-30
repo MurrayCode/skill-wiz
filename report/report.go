@@ -7,6 +7,7 @@ package report
 import (
 	"bytes"
 	_ "embed"
+	"errors"
 	"fmt"
 	"html/template"
 	"os"
@@ -34,10 +35,10 @@ type Input struct {
 	Result           result.Result
 }
 
-// Write renders the report and saves it to destination, creating parent
-// directories when they are missing.
-func Write(destination string, input Input) error {
-	page, err := Render(input)
+// Write renders the report for a whole run and saves it to destination,
+// creating parent directories when they are missing.
+func Write(destination string, inputs ...Input) error {
+	page, err := Render(inputs...)
 	if err != nil {
 		return err
 	}
@@ -54,10 +55,15 @@ func Write(destination string, input Input) error {
 	return nil
 }
 
-// Render returns the full HTML document for a scan result.
-func Render(input Input) (string, error) {
+// Render returns the full HTML document for a run. Every scanned skill lands on
+// the one page; which of them is on show is a reader-side choice.
+func Render(inputs ...Input) (string, error) {
+	if len(inputs) == 0 {
+		return "", errors.New("render report: no scans")
+	}
+
 	var buffer bytes.Buffer
-	if err := pageTemplate.Execute(&buffer, newPageView(input)); err != nil {
+	if err := pageTemplate.Execute(&buffer, newPageView(inputs)); err != nil {
 		return "", fmt.Errorf("render report: %w", err)
 	}
 
@@ -65,6 +71,15 @@ func Render(input Input) (string, error) {
 }
 
 type pageView struct {
+	Title      string
+	SkillCount int
+	Multiple   bool
+	Skills     []skillView
+}
+
+type skillView struct {
+	ID               string
+	Label            string
 	SkillName        string
 	SkillDescription string
 	SourcePath       string
@@ -99,10 +114,68 @@ var severityOrder = map[result.Severity]int{
 	result.SeverityInfo:    2,
 }
 
-func newPageView(input Input) pageView {
+func newPageView(inputs []Input) pageView {
+	labels := pickerLabels(inputs)
+
+	page := pageView{
+		Title:      skillTitle(inputs[0]),
+		SkillCount: len(inputs),
+		Multiple:   len(inputs) > 1,
+		Skills:     make([]skillView, 0, len(inputs)),
+	}
+	if page.Multiple {
+		page.Title = fmt.Sprintf("%d skills", len(inputs))
+	}
+
+	for index, input := range inputs {
+		skill := newSkillView(input)
+		skill.ID = fmt.Sprintf("skill-%d", index+1)
+		skill.Label = labels[index]
+		page.Skills = append(page.Skills, skill)
+	}
+
+	return page
+}
+
+// pickerLabels names each skill in the dropdown. File names are enough until
+// two scans share one, at which point every label falls back to the full path
+// so that no two entries read the same.
+func pickerLabels(inputs []Input) []string {
+	seen := make(map[string]int, len(inputs))
+	for _, input := range inputs {
+		seen[filepath.Base(strings.TrimSpace(input.SourcePath))]++
+	}
+
+	labels := make([]string, 0, len(inputs))
+	for _, input := range inputs {
+		path := strings.TrimSpace(input.SourcePath)
+		name := filepath.Base(path)
+
+		display := name
+		if path == "" {
+			display = skillTitle(input)
+		} else if seen[name] > 1 {
+			display = path
+		}
+
+		labels = append(labels, fmt.Sprintf("%s — %s", display, tally(len(input.Result.Findings))))
+	}
+
+	return labels
+}
+
+func tally(count int) string {
+	if count == 0 {
+		return "no findings"
+	}
+
+	return fmt.Sprintf("%d %s", count, pluralise(count))
+}
+
+func newSkillView(input Input) skillView {
 	findings := sortedFindings(input.Result.Findings)
 
-	view := pageView{
+	view := skillView{
 		SkillName:        skillTitle(input),
 		SkillDescription: strings.TrimSpace(input.SkillDescription),
 		SourcePath:       input.SourcePath,

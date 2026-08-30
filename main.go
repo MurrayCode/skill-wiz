@@ -67,11 +67,10 @@ func run(args []string, stdout io.Writer, stderr io.Writer) int {
 	}
 
 	analyzer := newSkillAnalyzer(opts.analyzerConfig())
-	base := reportBase(stderr)
 
 	scans := make([]fileScan, 0, len(files))
 	failed := false
-	for index, file := range files {
+	for _, file := range files {
 		scan, err := scanFile(file, analyzer)
 		if err != nil {
 			// One unreadable or unparseable file must not hide the rest: report
@@ -80,9 +79,6 @@ func run(args []string, stdout io.Writer, stderr io.Writer) int {
 			failed = true
 			continue
 		}
-		if base != "" {
-			scan.reportPath = writeReport(reportDestination(base, file, index, len(files)), scan, stderr)
-		}
 
 		scans = append(scans, scan)
 	}
@@ -90,8 +86,11 @@ func run(args []string, stdout io.Writer, stderr io.Writer) int {
 		return 1
 	}
 
+	// One run, one report: every scanned skill lands on the same page.
+	destination := writeReport(scans, stderr)
+
 	if opts.json {
-		rendered, err := renderJSON(jsonInputs(scans))
+		rendered, err := renderJSON(jsonInputs(scans, destination))
 		if err != nil {
 			fmt.Fprintf(stderr, "failed to render JSON output: %v\n", err)
 			return 1
@@ -105,6 +104,9 @@ func run(args []string, stdout io.Writer, stderr io.Writer) int {
 	}
 
 	fmt.Fprint(stdout, renderScans(scans, len(files)))
+	if destination != "" {
+		fmt.Fprint(stdout, renderReportPointer(destination))
+	}
 	if failed {
 		return 1
 	}
@@ -113,10 +115,9 @@ func run(args []string, stdout io.Writer, stderr io.Writer) int {
 
 // fileScan is the outcome of scanning one skill file.
 type fileScan struct {
-	path       string
-	skill      *skill.Skill
-	result     result.Result
-	reportPath string
+	path   string
+	skill  *skill.Skill
+	result result.Result
 }
 
 // scanFile parses and scans a single file. Validation short-circuits: a skill
@@ -199,69 +200,28 @@ func printUsage(flags *flag.FlagSet, w io.Writer) {
 	flags.SetOutput(io.Discard)
 }
 
-// reportBase resolves the destination a single-file run writes to, or "" when
-// no report can be written at all.
-func reportBase(stderr io.Writer) string {
-	base, err := reportPath()
+// writeReport saves the run's HTML report and returns where it landed, or ""
+// when it could not be written. A report that cannot be written is a warning,
+// not a scan failure: the console output already carries every finding.
+func writeReport(scans []fileScan, stderr io.Writer) string {
+	destination, err := reportPath()
 	if err != nil {
 		fmt.Fprintf(stderr, "failed to resolve HTML report path: %v\n", err)
 		return ""
 	}
 
-	return base
-}
-
-// reportDestination places one scan's report. A single scan keeps the base
-// destination; a multi-file run gives every scan its own file, numbered by
-// position so that identically named skills cannot overwrite each other.
-func reportDestination(base string, sourcePath string, index int, total int) string {
-	if total <= 1 {
-		return base
+	inputs := make([]report.Input, 0, len(scans))
+	for _, scan := range scans {
+		inputs = append(inputs, report.Input{
+			SkillName:        scan.skill.Name,
+			SkillDescription: scan.skill.Description,
+			SourcePath:       scan.path,
+			GeneratedAt:      time.Now(),
+			Result:           scan.result,
+		})
 	}
 
-	extension := filepath.Ext(base)
-
-	return fmt.Sprintf("%s-%d-%s%s", strings.TrimSuffix(base, extension), index+1, reportSlug(sourcePath), extension)
-}
-
-// reportSlug turns a source path into a file name fragment: lower case, with
-// runs of anything else collapsed into a single separator.
-func reportSlug(sourcePath string) string {
-	name := filepath.Base(sourcePath)
-	name = strings.TrimSuffix(name, filepath.Ext(name))
-
-	var builder strings.Builder
-	separated := false
-	for _, character := range strings.ToLower(name) {
-		switch {
-		case character >= 'a' && character <= 'z', character >= '0' && character <= '9':
-			builder.WriteRune(character)
-			separated = false
-		case !separated && builder.Len() > 0:
-			builder.WriteRune('-')
-			separated = true
-		}
-	}
-
-	slug := strings.Trim(builder.String(), "-")
-	if slug == "" {
-		return "skill"
-	}
-
-	return slug
-}
-
-// writeReport saves the HTML report and returns where it landed, or "" when it
-// could not be written. A report that cannot be written is a warning, not a
-// scan failure: the scan output already carries every finding.
-func writeReport(destination string, scan fileScan, stderr io.Writer) string {
-	if err := report.Write(destination, report.Input{
-		SkillName:        scan.skill.Name,
-		SkillDescription: scan.skill.Description,
-		SourcePath:       scan.path,
-		GeneratedAt:      time.Now(),
-		Result:           scan.result,
-	}); err != nil {
+	if err := report.Write(destination, inputs...); err != nil {
 		fmt.Fprintf(stderr, "failed to write HTML report: %v\n", err)
 		return ""
 	}
@@ -322,14 +282,16 @@ type jsonFinding struct {
 	Evidence string `json:"evidence"`
 }
 
-func jsonInputs(scans []fileScan) []jsonInput {
+// jsonInputs pairs every scan with the one report the run wrote, so a consumer
+// reading a single entry still knows where to look.
+func jsonInputs(scans []fileScan, reportPath string) []jsonInput {
 	inputs := make([]jsonInput, 0, len(scans))
 	for _, scan := range scans {
 		inputs = append(inputs, jsonInput{
 			Path:       scan.path,
 			Skill:      scan.skill,
 			Result:     scan.result,
-			ReportPath: scan.reportPath,
+			ReportPath: reportPath,
 		})
 	}
 
@@ -395,9 +357,6 @@ func renderScans(scans []fileScan, total int) string {
 		}
 
 		builder.WriteString(renderResult(scan.result))
-		if scan.reportPath != "" {
-			builder.WriteString(renderReportPointer(scan.reportPath))
-		}
 	}
 
 	return builder.String()
