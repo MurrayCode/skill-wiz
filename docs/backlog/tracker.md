@@ -71,7 +71,7 @@ This tracker records implementation progress for backlog stories in `docs/backlo
 
 | Story | Status | Completed On | Notes |
 | --- | --- | --- | --- |
-| `P6-001-drop-unused-adk-dependency.md` | `todo` |  | Raised 2026-08-31 from the code audit: `google.golang.org/adk` is a direct require with no importer; tidying drops it and 10 transitive deps. |
+| `P6-001-drop-unused-adk-dependency.md` | `done` | 2026-08-31 | Ran `go mod tidy`, dropping `google.golang.org/adk` and eleven transitive dependencies (-36 lines across `go.mod`/`go.sum`). No import changed; `go build ./...`, `go vet ./...` and `go test ./...` pass and a second tidy is a no-op. |
 | `P6-002-unicode-safe-tokenisation.md` | `todo` |  | Raised 2026-08-31 from the code audit: `splitAlphaNumeric` indexes bytes but converts with `rune()`, tearing multi-byte characters apart and poisoning `tokenSet`. |
 | `P6-003-collapse-equivalent-paths.md` | `todo` |  | Raised 2026-08-31 from the code audit: `discover.Files` dedupes on the raw argument, so `examples/./X.md` and `examples/X.md` both scan. |
 | `P6-004-linear-time-rule-scanning.md` | `todo` |  | Raised 2026-08-31 from the code audit: quadratic URL stripping, per-line shell regex, and a redundant URL pass; measured 4.5x, 22x, and 1.4x on the three paths. |
