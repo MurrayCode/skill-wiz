@@ -34,7 +34,7 @@ seam. Keep it that way when adding tests.
 
 Data flows one way, and every layer returns findings rather than printing:
 
-`main.run` → `discover.Files` → per file: `main.scanFile` (`skill.Parse` → `Skill.Validate` → `scanner.Scan` → (`rules.Scan` + `analyse.GeminiAnalyzer`) → `result.Merge`) → `main.renderScans` + `report.Write`
+`main.run` → `discover.Files` → `main.scanFiles` (bounded pool) → per file: `main.scanFile` (`skill.Parse` → `Skill.Validate` → `scanner.Scan` → (`rules.Scan` + `analyse.GeminiAnalyzer`) → `result.Merge`) → `main.renderScans` + `report.Write`
 
 - **`result`** is the leaf package and the common currency. `Finding` carries `Source`
   (`validation` | `rule` | `analyzer`), `Category`, `Severity`, `Message`, `Evidence`; `Result` wraps
@@ -66,7 +66,7 @@ Data flows one way, and every layer returns findings rather than printing:
   `text/template` or hand-built string concatenation.
 - **`main.go`** is flag parsing, wiring, and rendering, kept testable: `main` only calls
   `run(args, stdout, stderr, terminal) int`. `parseOptions` returns `options` (`paths`, `json`,
-  `noColor`, `model`, `timeout`, `failOn`) or an error; it prints usage itself and the flag set is silenced with `io.Discard` so
+  `noColor`, `model`, `timeout`, `failOn`, `concurrency`) or an error; it prints usage itself and the flag set is silenced with `io.Discard` so
   every failure is reported exactly once. `run` scans each discovered file through `scanFile` into a
   `fileScan` (`path`, `skill`, `result`), writes the one report, then renders them together. `--json` prints
   the JSON and nothing else — no clean message, no HTML report pointer — so keep that path free of
@@ -76,6 +76,12 @@ Data flows one way, and every layer returns findings rather than printing:
 
 - **Validation short-circuits.** If `Validate` fails, `scanFile` returns those findings *without*
   running rules or the LLM.
+- **Files are scanned concurrently, but consumed in file order.** `scanFiles` runs a bounded pool
+  (`--concurrency`, default `defaultConcurrency`) whose workers write into their own index of a
+  pre-sized `[]scanOutcome` and never append. `run` then walks that slice in order, so results *and*
+  the stderr failure messages are deterministic regardless of completion order — never write to
+  stderr from a worker. There is deliberately no shared cancellation: a fail-fast pool would break
+  "one bad file never hides the rest". `--timeout` still bounds a single request, not the run.
 - **One bad file never hides the rest.** A read, parse, or analysis failure is reported on stderr and
   the run continues with the remaining files; only a run where *every* file failed prints nothing.
 - **Single-file output is unchanged by multi-file support.** One file still renders with no path

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/murraycode/skill-wiz/analyse"
@@ -36,6 +37,11 @@ const (
 // analysisSkippedWarning is printed once per run, not once per file, when the
 // analysis leg has no credential to run with.
 const analysisSkippedWarning = "Warning: analysis leg skipped — GEMINI_API_KEY is not set, so this run used the deterministic rules only."
+
+// defaultConcurrency bounds how many files are scanned at once. The work is
+// network-bound rather than CPU-bound, so the right default follows what the
+// API tolerates, not how many cores the machine has.
+const defaultConcurrency = 8
 
 // maxEvidenceRunes bounds an evidence summary in the console. The HTML report
 // keeps the full text, so truncating here loses nothing.
@@ -105,12 +111,13 @@ var reportPath = defaultReportPath
 
 // options is the parsed command line for a single run.
 type options struct {
-	paths   []string
-	json    bool
-	noColor bool
-	model   string
-	timeout time.Duration
-	failOn  result.Severity
+	paths       []string
+	json        bool
+	noColor     bool
+	model       string
+	timeout     time.Duration
+	failOn      result.Severity
+	concurrency int
 }
 
 func (o options) analyzerConfig() analyse.Config {
@@ -152,19 +159,23 @@ func run(args []string, stdout io.Writer, stderr io.Writer, terminal bool) int {
 		analyzer = newSkillAnalyzer(opts.analyzerConfig())
 	}
 
+	outcomes := scanFiles(files, analyzer, opts.concurrency)
+
+	// Both the results and the failures are consumed in file order, not in the
+	// order the workers finished, so console output, the report, the JSON array,
+	// the tally, and the stderr failures all stay deterministic.
 	scans := make([]fileScan, 0, len(files))
 	failed := false
-	for _, file := range files {
-		scan, err := scanFile(file, analyzer)
-		if err != nil {
+	for index, outcome := range outcomes {
+		if outcome.err != nil {
 			// One unreadable or unparseable file must not hide the rest: report
 			// it, remember the failure for the exit code, and carry on.
-			fmt.Fprintln(stderr, scanError(file, err, len(files)))
+			fmt.Fprintln(stderr, scanError(files[index], outcome.err, len(files)))
 			failed = true
 			continue
 		}
 
-		scans = append(scans, scan)
+		scans = append(scans, outcome.scan)
 	}
 	if len(scans) == 0 {
 		return exitFailure
@@ -211,6 +222,58 @@ func exitCode(scans []fileScan, failed bool, threshold result.Severity) int {
 	}
 
 	return exitClean
+}
+
+// scanOutcome is one file's result or the error that stopped it, held together
+// so a worker can report either without touching shared state.
+type scanOutcome struct {
+	scan fileScan
+	err  error
+}
+
+// scanFiles scans every file through a bounded worker pool. The pool is bounded
+// rather than one goroutine per file because a directory scan can cover
+// hundreds of skills and each one is an API request: unbounded goroutines would
+// mean hundreds of simultaneous requests and near-certain rate limiting.
+//
+// Each worker writes to its own index of a pre-sized slice and never appends, so
+// results come back in file order however completion order fell out. There is no
+// shared cancellation: one bad file must never hide the rest, and a fail-fast
+// pool would break exactly that.
+func scanFiles(files []string, analyzer scanner.Analyzer, concurrency int) []scanOutcome {
+	outcomes := make([]scanOutcome, len(files))
+	if len(files) == 0 {
+		return outcomes
+	}
+
+	workers := concurrency
+	if workers < 1 {
+		workers = 1
+	}
+	if workers > len(files) {
+		workers = len(files)
+	}
+
+	indexes := make(chan int)
+	var waitGroup sync.WaitGroup
+	for worker := 0; worker < workers; worker++ {
+		waitGroup.Add(1)
+		go func() {
+			defer waitGroup.Done()
+			for index := range indexes {
+				scan, err := scanFile(files[index], analyzer)
+				outcomes[index] = scanOutcome{scan: scan, err: err}
+			}
+		}()
+	}
+
+	for index := range files {
+		indexes <- index
+	}
+	close(indexes)
+	waitGroup.Wait()
+
+	return outcomes
 }
 
 // fileScan is the outcome of scanning one skill file.
@@ -267,6 +330,7 @@ func parseOptions(args []string, stderr io.Writer) (options, error) {
 	model := flags.String("model", analyse.DefaultModel, "Gemini model used for the analysis leg")
 	timeout := flags.Duration("timeout", analyse.DefaultTimeout, "maximum time to wait for the analysis leg")
 	failOn := flags.String("fail-on", string(result.SeverityError), "lowest finding severity that fails the run: error, warning, or info")
+	concurrency := flags.Int("concurrency", defaultConcurrency, "how many files to scan at once; --timeout still bounds each analysis request individually")
 
 	if err := flags.Parse(args); err != nil {
 		printUsage(flags, stderr)
@@ -278,6 +342,9 @@ func parseOptions(args []string, stderr io.Writer) (options, error) {
 	}
 	if *timeout <= 0 {
 		return options{}, errors.New("invalid -timeout: must be greater than zero")
+	}
+	if *concurrency <= 0 {
+		return options{}, errors.New("invalid -concurrency: must be greater than zero")
 	}
 	threshold, err := parseSeverity(*failOn)
 	if err != nil {
@@ -291,12 +358,13 @@ func parseOptions(args []string, stderr io.Writer) (options, error) {
 	}
 
 	return options{
-		paths:   positional,
-		json:    *emitJSON,
-		noColor: *noColor,
-		model:   strings.TrimSpace(*model),
-		timeout: *timeout,
-		failOn:  threshold,
+		paths:       positional,
+		json:        *emitJSON,
+		noColor:     *noColor,
+		model:       strings.TrimSpace(*model),
+		timeout:     *timeout,
+		failOn:      threshold,
+		concurrency: *concurrency,
 	}, nil
 }
 

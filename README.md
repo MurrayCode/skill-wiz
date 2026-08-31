@@ -131,9 +131,19 @@ skill-wiz ~/.claude/skills ./team-skills              # directories and files to
 | `--model` | `gemini-2.5-flash` | Gemini model used for the analysis leg |
 | `--timeout` | `1m` | Maximum time to wait for the analysis leg |
 | `--fail-on` | `error` | Lowest finding severity that fails the run: `error`, `warning`, or `info` |
+| `--concurrency` | `8` | How many files to scan at once |
 
 One unreadable or unparseable file never hides the rest: it is reported on stderr and the run
 carries on. However many files a run covers, it writes one HTML report.
+
+Files are scanned through a bounded worker pool, so a directory costs roughly one analyzer round trip
+per batch rather than one per file. The default of `8` follows what the API tolerates rather than the
+machine's core count — the work is network-bound. `--concurrency 1` scans sequentially.
+
+Concurrency changes nothing you can see: results, the report, the JSON array, the tally, and the
+stderr failure messages all stay in file order however the workers finished, so the output of a
+concurrent run is byte-identical to a sequential one. **`--timeout` remains per request** — it bounds
+each analysis call, not the run as a whole.
 
 ### Exit codes
 

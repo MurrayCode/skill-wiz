@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -32,58 +33,78 @@ func TestParseOptions(t *testing.T) {
 		{
 			name: "path only uses defaults",
 			args: []string{"skill.md"},
-			want: options{paths: []string{"skill.md"}, model: analyse.DefaultModel, timeout: analyse.DefaultTimeout, failOn: result.SeverityError},
+			want: options{paths: []string{"skill.md"}, model: analyse.DefaultModel, timeout: analyse.DefaultTimeout, failOn: result.SeverityError, concurrency: defaultConcurrency},
 		},
 		{
 			name: "flags are applied before the path",
 			args: []string{"--json", "--model", "gemini-2.5-pro", "--timeout", "15s", "skill.md"},
-			want: options{paths: []string{"skill.md"}, json: true, model: "gemini-2.5-pro", timeout: 15 * time.Second, failOn: result.SeverityError},
+			want: options{paths: []string{"skill.md"}, json: true, model: "gemini-2.5-pro", timeout: 15 * time.Second, failOn: result.SeverityError, concurrency: defaultConcurrency},
 		},
 		{
 			name: "no-color is parsed",
 			args: []string{"--no-color", "skill.md"},
 			want: options{
-				paths:   []string{"skill.md"},
-				noColor: true,
-				model:   analyse.DefaultModel,
-				timeout: analyse.DefaultTimeout,
-				failOn:  result.SeverityError,
+				paths:       []string{"skill.md"},
+				noColor:     true,
+				model:       analyse.DefaultModel,
+				timeout:     analyse.DefaultTimeout,
+				failOn:      result.SeverityError,
+				concurrency: defaultConcurrency,
 			},
 		},
 		{
 			name: "single dash flags are accepted",
 			args: []string{"-json", "-timeout=5s", "skill.md"},
-			want: options{paths: []string{"skill.md"}, json: true, model: analyse.DefaultModel, timeout: 5 * time.Second, failOn: result.SeverityError},
+			want: options{paths: []string{"skill.md"}, json: true, model: analyse.DefaultModel, timeout: 5 * time.Second, failOn: result.SeverityError, concurrency: defaultConcurrency},
 		},
 		{
 			name: "every positional argument becomes a path",
 			args: []string{"first.md", "skills", "second.md"},
 			want: options{
-				paths:   []string{"first.md", "skills", "second.md"},
-				model:   analyse.DefaultModel,
-				timeout: analyse.DefaultTimeout,
-				failOn:  result.SeverityError,
+				paths:       []string{"first.md", "skills", "second.md"},
+				model:       analyse.DefaultModel,
+				timeout:     analyse.DefaultTimeout,
+				failOn:      result.SeverityError,
+				concurrency: defaultConcurrency,
 			},
 		},
 		{
 			name: "fail-on lowers the gate",
 			args: []string{"--fail-on", "warning", "skill.md"},
 			want: options{
-				paths:   []string{"skill.md"},
-				model:   analyse.DefaultModel,
-				timeout: analyse.DefaultTimeout,
-				failOn:  result.SeverityWarning,
+				paths:       []string{"skill.md"},
+				model:       analyse.DefaultModel,
+				timeout:     analyse.DefaultTimeout,
+				failOn:      result.SeverityWarning,
+				concurrency: defaultConcurrency,
 			},
 		},
 		{
 			name: "fail-on is case insensitive and trimmed",
 			args: []string{"--fail-on", " INFO ", "skill.md"},
 			want: options{
-				paths:   []string{"skill.md"},
-				model:   analyse.DefaultModel,
-				timeout: analyse.DefaultTimeout,
-				failOn:  result.SeverityInfo,
+				paths:       []string{"skill.md"},
+				model:       analyse.DefaultModel,
+				timeout:     analyse.DefaultTimeout,
+				failOn:      result.SeverityInfo,
+				concurrency: defaultConcurrency,
 			},
+		},
+		{
+			name: "concurrency is parsed",
+			args: []string{"--concurrency", "3", "skill.md"},
+			want: options{
+				paths:       []string{"skill.md"},
+				model:       analyse.DefaultModel,
+				timeout:     analyse.DefaultTimeout,
+				failOn:      result.SeverityError,
+				concurrency: 3,
+			},
+		},
+		{
+			name:    "non-positive concurrency is rejected",
+			args:    []string{"--concurrency", "0", "skill.md"},
+			wantErr: "invalid -concurrency: must be greater than zero",
 		},
 		{
 			name:    "unknown fail-on severity is rejected",
@@ -1772,6 +1793,203 @@ func TestRunWithAPIKeyIsUnchanged(t *testing.T) {
 				if strings.Contains(combined, missing) {
 					t.Fatalf("run() output = %q, want no substring %q", combined, missing)
 				}
+			}
+		})
+	}
+}
+
+// staggeredAnalyzer delays each skill by a per-name duration so that the order
+// scans complete differs from the order their files were given, and records the
+// order in which it was entered.
+func staggeredAnalyzer(delays map[string]time.Duration, entered *[]string, mu *sync.Mutex) scanner.Analyzer {
+	return scanner.AnalyzerFunc(func(s *skill.Skill) (result.Result, error) {
+		mu.Lock()
+		*entered = append(*entered, s.Name)
+		mu.Unlock()
+
+		time.Sleep(delays[s.Name])
+
+		return result.NewCleanResult(), nil
+	})
+}
+
+func TestRunScansConcurrentlyAndRendersInFileOrder(t *testing.T) {
+	// The first file is the slowest, so a pool that rendered by completion
+	// order rather than by file index would put it last.
+	delays := map[string]time.Duration{
+		"alpha": 60 * time.Millisecond,
+		"bravo": 30 * time.Millisecond,
+		"delta": 0,
+	}
+
+	tests := []struct {
+		name        string
+		flags       []string
+		wantEntered []string
+	}{
+		{
+			name:  "default concurrency",
+			flags: nil,
+		},
+		{
+			name:        "concurrency 1 scans sequentially",
+			flags:       []string{"--concurrency", "1"},
+			wantEntered: []string{"alpha", "bravo", "delta"},
+		},
+		{
+			name:  "concurrency above the file count",
+			flags: []string{"--concurrency", "16"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("GEMINI_API_KEY", "test-key")
+
+			directory := t.TempDir()
+			names := []string{"alpha", "bravo", "delta"}
+			paths := make([]string, 0, len(names))
+			for _, name := range names {
+				path := filepath.Join(directory, name+".md")
+				content := fmt.Sprintf("---\nname: %s\ndescription: describes the %s skill clearly\n---\nExplain the %s topic to the reader.\n", name, name, name)
+				if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+					t.Fatalf("write fixture: %v", err)
+				}
+				paths = append(paths, path)
+			}
+
+			reportDirectory := t.TempDir()
+			originalReportPath := reportPath
+			reportPath = func() (string, error) {
+				return filepath.Join(reportDirectory, "skill-wiz-report.html"), nil
+			}
+			var mu sync.Mutex
+			var entered []string
+			originalAnalyzer := newSkillAnalyzer
+			newSkillAnalyzer = func(analyse.Config) scanner.Analyzer {
+				return staggeredAnalyzer(delays, &entered, &mu)
+			}
+			defer func() {
+				reportPath = originalReportPath
+				newSkillAnalyzer = originalAnalyzer
+			}()
+
+			var stdout, stderr bytes.Buffer
+			gotCode := run(append(append([]string{}, tt.flags...), paths...), &stdout, &stderr, false)
+
+			if gotCode != exitClean {
+				t.Fatalf("run() code = %d, want %d (stderr = %q)", gotCode, exitClean, stderr.String())
+			}
+
+			previous := -1
+			for _, path := range paths {
+				index := strings.Index(stdout.String(), "=== "+path+" ===")
+				if index < 0 {
+					t.Fatalf("run() stdout = %q, want header for %q", stdout.String(), path)
+				}
+				if index < previous {
+					t.Fatalf("run() rendered %q out of file order:\n%s", path, stdout.String())
+				}
+				previous = index
+			}
+
+			if tt.wantEntered != nil {
+				mu.Lock()
+				got := append([]string{}, entered...)
+				mu.Unlock()
+				if len(got) != len(tt.wantEntered) {
+					t.Fatalf("scan order = %v, want %v", got, tt.wantEntered)
+				}
+				for i := range got {
+					if got[i] != tt.wantEntered[i] {
+						t.Fatalf("scan order = %v, want %v", got, tt.wantEntered)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestRunReportsConcurrentFailuresInFileOrder(t *testing.T) {
+	t.Setenv("GEMINI_API_KEY", "test-key")
+
+	directory := t.TempDir()
+	// The two failures sit either side of a slow success, so a pool writing
+	// stderr from its workers would be free to interleave them.
+	files := []struct {
+		name    string
+		content string
+	}{
+		{name: "a-broken.md", content: "no frontmatter here"},
+		{name: "b-good.md", content: "---\nname: bravo\ndescription: describes the bravo skill clearly\n---\nExplain the bravo topic.\n"},
+		{name: "c-broken.md", content: "also no frontmatter"},
+	}
+
+	paths := make([]string, 0, len(files))
+	for _, file := range files {
+		path := filepath.Join(directory, file.name)
+		if err := os.WriteFile(path, []byte(file.content), 0o600); err != nil {
+			t.Fatalf("write fixture: %v", err)
+		}
+		paths = append(paths, path)
+	}
+
+	reportDirectory := t.TempDir()
+	originalReportPath := reportPath
+	reportPath = func() (string, error) {
+		return filepath.Join(reportDirectory, "skill-wiz-report.html"), nil
+	}
+	var mu sync.Mutex
+	var entered []string
+	originalAnalyzer := newSkillAnalyzer
+	newSkillAnalyzer = func(analyse.Config) scanner.Analyzer {
+		return staggeredAnalyzer(map[string]time.Duration{"bravo": 40 * time.Millisecond}, &entered, &mu)
+	}
+	defer func() {
+		reportPath = originalReportPath
+		newSkillAnalyzer = originalAnalyzer
+	}()
+
+	var stdout, stderr bytes.Buffer
+	if gotCode := run(paths, &stdout, &stderr, false); gotCode != exitFailure {
+		t.Fatalf("run() code = %d, want %d", gotCode, exitFailure)
+	}
+
+	first := strings.Index(stderr.String(), paths[0])
+	second := strings.Index(stderr.String(), paths[2])
+	if first < 0 || second < 0 {
+		t.Fatalf("run() stderr = %q, want both failures reported", stderr.String())
+	}
+	if first > second {
+		t.Fatalf("run() reported failures out of file order:\n%s", stderr.String())
+	}
+}
+
+func TestRunRejectsInvalidConcurrency(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+	}{
+		{name: "zero", value: "0"},
+		{name: "negative", value: "-2"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "skill.md")
+			content := "---\nname: greeting\ndescription: greets the reader politely\n---\nGreet the reader politely.\n"
+			if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+				t.Fatalf("write fixture: %v", err)
+			}
+
+			var stdout, stderr bytes.Buffer
+			gotCode := run([]string{"--concurrency", tt.value, path}, &stdout, &stderr, false)
+
+			if gotCode != exitFailure {
+				t.Fatalf("run() code = %d, want %d", gotCode, exitFailure)
+			}
+			if got := strings.Count(stderr.String(), "invalid -concurrency"); got != 1 {
+				t.Fatalf("stderr reported the error %d times, want 1: %q", got, stderr.String())
 			}
 		})
 	}
