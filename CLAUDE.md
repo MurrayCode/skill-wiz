@@ -19,7 +19,8 @@ detections never depend on the model.
 - Vet: `go vet ./...`
 - Run: `go run . [flags] <path-to-skill-file-or-directory>...` — e.g.
   `go run . examples/HIDDENBASHSKILL.md` or `go run . examples`. Flags: `--json` (machine-readable
-  output), `--model` (default `gemini-2.5-flash`), `--timeout` (default `1m`).
+  output), `--model` (default `gemini-2.5-flash`), `--timeout` (default `1m`), `--fail-on`
+  (default `error`).
 - Test all: `go test ./...`
 - Test one package: `go test ./rules/...`
 - Test one case: `go test ./skill/... -run TestParse/valid_skill`
@@ -64,7 +65,7 @@ Data flows one way, and every layer returns findings rather than printing:
   `text/template` or hand-built string concatenation.
 - **`main.go`** is flag parsing, wiring, and rendering, kept testable: `main` only calls
   `run(args, stdout, stderr) int`. `parseOptions` returns `options` (`paths`, `json`, `model`,
-  `timeout`) or an error; it prints usage itself and the flag set is silenced with `io.Discard` so
+  `timeout`, `failOn`) or an error; it prints usage itself and the flag set is silenced with `io.Discard` so
   every failure is reported exactly once. `run` scans each discovered file through `scanFile` into a
   `fileScan` (`path`, `skill`, `result`), writes the one report, then renders them together. `--json` prints
   the JSON and nothing else — no clean message, no HTML report pointer — so keep that path free of
@@ -86,9 +87,12 @@ Data flows one way, and every layer returns findings rather than printing:
   `<select>` is `hidden`; the inline script unhides the picker and hides the other sections. Without
   JavaScript a reader still sees every skill rather than one panel and a dead control — keep that
   order if you touch the script.
-- **Findings do not yet affect the exit code.** `run` returns 1 only for usage/discovery/read/parse/
-  scan *errors*; a flagged skill still exits 0. That is story `P4-003-exit-codes`, still `todo` — don't
-  "fix" it incidentally.
+- **Exit codes are a three-way contract.** `0` clean, `1` operational failure (usage, discovery,
+  read, parse, scan), `2` at least one finding at or above the active threshold. `exitCode` maps a
+  finished run onto that, and an operational failure outranks findings — a run with both exits `1`.
+  `--fail-on` (`error` by default, also `warning` or `info`) sets the threshold via `parseSeverity`
+  and `severityRank`; an unrecognised severity ranks lowest so it can never fail a build on its own.
+  Both the text and JSON branches return the same code. Don't renumber `1`.
 - **The scanner degrades rather than fails.** If the analyzer errors but rules already found
   something, `Scan` returns the rule findings and swallows the error; it propagates the error only
   when rules were clean (`scanner/scanner.go:38`). So a missing `GEMINI_API_KEY` is fatal only for

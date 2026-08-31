@@ -23,6 +23,24 @@ import (
 
 const reportFileName = "skill-wiz-report.html"
 
+// Exit codes. A flagged scan is deliberately distinct from an operational
+// failure so a pipeline can tell "this skill looks wrong" from "the scan did
+// not run". Do not renumber these.
+const (
+	exitClean    = 0
+	exitFailure  = 1
+	exitFindings = 2
+)
+
+// severityRank orders severities so that a threshold can be compared against a
+// finding. An unrecognised severity ranks lowest, so it gates only the most
+// permissive threshold rather than silently failing a build.
+var severityRank = map[result.Severity]int{
+	result.SeverityInfo:    0,
+	result.SeverityWarning: 1,
+	result.SeverityError:   2,
+}
+
 // newSkillAnalyzer builds the analyzer for a run. It is a var so tests can
 // substitute the model without touching the flag plumbing.
 var newSkillAnalyzer = func(config analyse.Config) scanner.Analyzer {
@@ -38,6 +56,7 @@ type options struct {
 	json    bool
 	model   string
 	timeout time.Duration
+	failOn  result.Severity
 }
 
 func (o options) analyzerConfig() analyse.Config {
@@ -54,16 +73,16 @@ func run(args []string, stdout io.Writer, stderr io.Writer) int {
 		// -h and -help are a request, not a failure: the flag set has already
 		// printed usage.
 		if errors.Is(err, flag.ErrHelp) {
-			return 0
+			return exitClean
 		}
 		fmt.Fprintln(stderr, err)
-		return 1
+		return exitFailure
 	}
 
 	files, err := discover.Files(opts.paths)
 	if err != nil {
 		fmt.Fprintf(stderr, "failed to collect skill files: %v\n", err)
-		return 1
+		return exitFailure
 	}
 
 	analyzer := newSkillAnalyzer(opts.analyzerConfig())
@@ -83,7 +102,7 @@ func run(args []string, stdout io.Writer, stderr io.Writer) int {
 		scans = append(scans, scan)
 	}
 	if len(scans) == 0 {
-		return 1
+		return exitFailure
 	}
 
 	// One run, one report: every scanned skill lands on the same page.
@@ -93,24 +112,37 @@ func run(args []string, stdout io.Writer, stderr io.Writer) int {
 		rendered, err := renderJSON(jsonInputs(scans, destination))
 		if err != nil {
 			fmt.Fprintf(stderr, "failed to render JSON output: %v\n", err)
-			return 1
+			return exitFailure
 		}
 
 		fmt.Fprintln(stdout, rendered)
-		if failed {
-			return 1
-		}
-		return 0
+		return exitCode(scans, failed, opts.failOn)
 	}
 
 	fmt.Fprint(stdout, renderScans(scans, len(files)))
 	if destination != "" {
 		fmt.Fprint(stdout, renderReportPointer(destination))
 	}
+	return exitCode(scans, failed, opts.failOn)
+}
+
+// exitCode maps a completed run onto its exit code. An operational failure
+// outranks findings: a run that could not scan every file reports that first,
+// even when the files it did scan were flagged.
+func exitCode(scans []fileScan, failed bool, threshold result.Severity) int {
 	if failed {
-		return 1
+		return exitFailure
 	}
-	return 0
+
+	for _, scan := range scans {
+		for _, finding := range scan.result.Findings {
+			if severityRank[finding.Severity] >= severityRank[threshold] {
+				return exitFindings
+			}
+		}
+	}
+
+	return exitClean
 }
 
 // fileScan is the outcome of scanning one skill file.
@@ -165,6 +197,7 @@ func parseOptions(args []string, stderr io.Writer) (options, error) {
 	emitJSON := flags.Bool("json", false, "print the scan result as JSON instead of human-readable text")
 	model := flags.String("model", analyse.DefaultModel, "Gemini model used for the analysis leg")
 	timeout := flags.Duration("timeout", analyse.DefaultTimeout, "maximum time to wait for the analysis leg")
+	failOn := flags.String("fail-on", string(result.SeverityError), "lowest finding severity that fails the run: error, warning, or info")
 
 	if err := flags.Parse(args); err != nil {
 		printUsage(flags, stderr)
@@ -176,6 +209,10 @@ func parseOptions(args []string, stderr io.Writer) (options, error) {
 	}
 	if *timeout <= 0 {
 		return options{}, errors.New("invalid -timeout: must be greater than zero")
+	}
+	threshold, err := parseSeverity(*failOn)
+	if err != nil {
+		return options{}, err
 	}
 
 	positional := flags.Args()
@@ -189,7 +226,19 @@ func parseOptions(args []string, stderr io.Writer) (options, error) {
 		json:    *emitJSON,
 		model:   strings.TrimSpace(*model),
 		timeout: *timeout,
+		failOn:  threshold,
 	}, nil
+}
+
+// parseSeverity turns a --fail-on value into the threshold that gates the exit
+// code, rejecting anything outside the known severities.
+func parseSeverity(value string) (result.Severity, error) {
+	severity := result.Severity(strings.ToLower(strings.TrimSpace(value)))
+	if _, ok := severityRank[severity]; !ok {
+		return "", fmt.Errorf("invalid -fail-on %q: must be one of error, warning, info", strings.TrimSpace(value))
+	}
+
+	return severity, nil
 }
 
 func printUsage(flags *flag.FlagSet, w io.Writer) {

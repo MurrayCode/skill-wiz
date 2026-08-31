@@ -30,17 +30,17 @@ func TestParseOptions(t *testing.T) {
 		{
 			name: "path only uses defaults",
 			args: []string{"skill.md"},
-			want: options{paths: []string{"skill.md"}, model: analyse.DefaultModel, timeout: analyse.DefaultTimeout},
+			want: options{paths: []string{"skill.md"}, model: analyse.DefaultModel, timeout: analyse.DefaultTimeout, failOn: result.SeverityError},
 		},
 		{
 			name: "flags are applied before the path",
 			args: []string{"--json", "--model", "gemini-2.5-pro", "--timeout", "15s", "skill.md"},
-			want: options{paths: []string{"skill.md"}, json: true, model: "gemini-2.5-pro", timeout: 15 * time.Second},
+			want: options{paths: []string{"skill.md"}, json: true, model: "gemini-2.5-pro", timeout: 15 * time.Second, failOn: result.SeverityError},
 		},
 		{
 			name: "single dash flags are accepted",
 			args: []string{"-json", "-timeout=5s", "skill.md"},
-			want: options{paths: []string{"skill.md"}, json: true, model: analyse.DefaultModel, timeout: 5 * time.Second},
+			want: options{paths: []string{"skill.md"}, json: true, model: analyse.DefaultModel, timeout: 5 * time.Second, failOn: result.SeverityError},
 		},
 		{
 			name: "every positional argument becomes a path",
@@ -49,7 +49,33 @@ func TestParseOptions(t *testing.T) {
 				paths:   []string{"first.md", "skills", "second.md"},
 				model:   analyse.DefaultModel,
 				timeout: analyse.DefaultTimeout,
+				failOn:  result.SeverityError,
 			},
+		},
+		{
+			name: "fail-on lowers the gate",
+			args: []string{"--fail-on", "warning", "skill.md"},
+			want: options{
+				paths:   []string{"skill.md"},
+				model:   analyse.DefaultModel,
+				timeout: analyse.DefaultTimeout,
+				failOn:  result.SeverityWarning,
+			},
+		},
+		{
+			name: "fail-on is case insensitive and trimmed",
+			args: []string{"--fail-on", " INFO ", "skill.md"},
+			want: options{
+				paths:   []string{"skill.md"},
+				model:   analyse.DefaultModel,
+				timeout: analyse.DefaultTimeout,
+				failOn:  result.SeverityInfo,
+			},
+		},
+		{
+			name:    "unknown fail-on severity is rejected",
+			args:    []string{"--fail-on", "critical", "skill.md"},
+			wantErr: `invalid -fail-on "critical": must be one of error, warning, info`,
 		},
 		{
 			name:    "missing path returns usage error",
@@ -475,6 +501,85 @@ func TestRenderReportPointer(t *testing.T) {
 	}
 }
 
+func TestExitCode(t *testing.T) {
+	flagged := func(severity result.Severity) fileScan {
+		return fileScan{result: result.NewResult(result.Finding{
+			Source:   result.SourceRule,
+			Category: result.Category("shell"),
+			Severity: severity,
+			Message:  "flagged",
+		})}
+	}
+	clean := fileScan{result: result.NewCleanResult()}
+
+	tests := []struct {
+		name      string
+		scans     []fileScan
+		failed    bool
+		threshold result.Severity
+		want      int
+	}{
+		{
+			name:      "clean run exits zero",
+			scans:     []fileScan{clean, clean},
+			threshold: result.SeverityError,
+			want:      exitClean,
+		},
+		{
+			name:      "error finding exits two",
+			scans:     []fileScan{clean, flagged(result.SeverityError)},
+			threshold: result.SeverityError,
+			want:      exitFindings,
+		},
+		{
+			name:      "warning finding is below the default threshold",
+			scans:     []fileScan{flagged(result.SeverityWarning)},
+			threshold: result.SeverityError,
+			want:      exitClean,
+		},
+		{
+			name:      "warning finding gates a lowered threshold",
+			scans:     []fileScan{flagged(result.SeverityWarning)},
+			threshold: result.SeverityWarning,
+			want:      exitFindings,
+		},
+		{
+			name:      "info finding only gates the lowest threshold",
+			scans:     []fileScan{flagged(result.SeverityInfo)},
+			threshold: result.SeverityWarning,
+			want:      exitClean,
+		},
+		{
+			name:      "any finding gates fail-on info",
+			scans:     []fileScan{flagged(result.SeverityInfo)},
+			threshold: result.SeverityInfo,
+			want:      exitFindings,
+		},
+		{
+			name:      "operational failure outranks findings",
+			scans:     []fileScan{flagged(result.SeverityError)},
+			failed:    true,
+			threshold: result.SeverityError,
+			want:      exitFailure,
+		},
+		{
+			name:      "operational failure alone exits one",
+			scans:     []fileScan{clean},
+			failed:    true,
+			threshold: result.SeverityError,
+			want:      exitFailure,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := exitCode(tt.scans, tt.failed, tt.threshold); got != tt.want {
+				t.Fatalf("exitCode() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestRun(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -495,13 +600,13 @@ func TestRun(t *testing.T) {
 		{
 			name:       "missing path returns usage error",
 			args:       nil,
-			wantCode:   1,
+			wantCode:   exitFailure,
 			wantOutput: []string{"Please provide a path to a skill file"},
 		},
 		{
-			name:     "mismatch example is flagged by rules before analyzer",
+			name:     "warning-only findings exit clean under the default threshold",
 			args:     []string{filepath.Join("examples", "MISMATCHSKILL.md")},
-			wantCode: 0,
+			wantCode: exitClean,
 			wantOutput: []string{
 				"Scan flagged 2 finding(s) from rule checks",
 				"[warning] url (rule): URL domain appears unrelated to the skill purpose",
@@ -517,7 +622,7 @@ func TestRun(t *testing.T) {
 		},
 		{
 			name:        "default shell rules flag local script before analyzer",
-			wantCode:    0,
+			wantCode:    exitFindings,
 			wantAnalyze: true,
 			content:     "---\nname: test skill\ndescription: a test skill\n---\nRun ./scripts/racing.sh before answering.",
 			analyzer: scanner.AnalyzerFunc(func(*skill.Skill) (result.Result, error) {
@@ -543,7 +648,7 @@ func TestRun(t *testing.T) {
 		},
 		{
 			name:        "rule findings are merged with analyzer results",
-			wantCode:    0,
+			wantCode:    exitClean,
 			wantAnalyze: true,
 			rules: []rules.Rule{
 				rules.RuleFunc(func(*skill.Skill) []result.Finding {
@@ -579,7 +684,7 @@ func TestRun(t *testing.T) {
 		},
 		{
 			name:        "validation failures are reported without running the analyzer",
-			wantCode:    0,
+			wantCode:    exitFindings,
 			wantAnalyze: true,
 			content:     "---\nlicense: MIT\n---\nbody",
 			analyzer: scanner.AnalyzerFunc(func(*skill.Skill) (result.Result, error) {
@@ -598,7 +703,7 @@ func TestRun(t *testing.T) {
 		},
 		{
 			name:     "analysis failure returns useful message",
-			wantCode: 1,
+			wantCode: exitFailure,
 			analyzer: scanner.AnalyzerFunc(func(*skill.Skill) (result.Result, error) {
 				return result.Result{}, errors.New("missing GEMINI_API_KEY")
 			}),
@@ -607,7 +712,7 @@ func TestRun(t *testing.T) {
 		},
 		{
 			name:        "analyzer failure after rule findings still reports the scan",
-			wantCode:    0,
+			wantCode:    exitFindings,
 			wantAnalyze: true,
 			content:     "---\nname: test skill\ndescription: a test skill\n---\nRun ./scripts/racing.sh before answering.",
 			analyzer: scanner.AnalyzerFunc(func(*skill.Skill) (result.Result, error) {
@@ -622,7 +727,7 @@ func TestRun(t *testing.T) {
 		},
 		{
 			name:        "unusable analyzer response is reported instead of a clean result",
-			wantCode:    0,
+			wantCode:    exitClean,
 			wantAnalyze: true,
 			analyzer: scanner.AnalyzerFunc(func(*skill.Skill) (result.Result, error) {
 				return result.NewResult(result.Finding{
@@ -644,7 +749,7 @@ func TestRun(t *testing.T) {
 		{
 			name:        "analysis failure in json mode reports the error and prints no JSON",
 			flags:       []string{"--json"},
-			wantCode:    1,
+			wantCode:    exitFailure,
 			wantAnalyze: true,
 			analyzer: scanner.AnalyzerFunc(func(*skill.Skill) (result.Result, error) {
 				return result.Result{}, errors.New("generate analysis: upstream unavailable")
@@ -653,15 +758,30 @@ func TestRun(t *testing.T) {
 			wantNoStdout: true,
 		},
 		{
+			name:     "fail-on warning gates a warning-only run",
+			args:     []string{"--fail-on", "warning", filepath.Join("examples", "MISMATCHSKILL.md")},
+			wantCode: exitFindings,
+			wantOutput: []string{
+				"[warning] mismatch (rule): skill instructions diverge from declared purpose",
+			},
+			wantReport: []string{"skill-wiz"},
+		},
+		{
+			name:       "invalid fail-on value is reported once",
+			args:       []string{"--fail-on", "critical", filepath.Join("examples", "CLEANSKILL.md")},
+			wantCode:   exitFailure,
+			wantOutput: []string{`invalid -fail-on "critical": must be one of error, warning, info`},
+		},
+		{
 			name:       "unknown flag returns a clear error",
 			args:       []string{"--nope", filepath.Join("examples", "CLEANSKILL.md")},
-			wantCode:   1,
+			wantCode:   exitFailure,
 			wantOutput: []string{"flag provided but not defined: -nope"},
 		},
 		{
 			name:        "model and timeout flags reach the analyzer",
 			flags:       []string{"--model", "gemini-2.5-pro", "--timeout", "12s"},
-			wantCode:    0,
+			wantCode:    exitClean,
 			wantAnalyze: true,
 			analyzer: scanner.AnalyzerFunc(func(*skill.Skill) (result.Result, error) {
 				return result.NewCleanResult(), nil
@@ -673,7 +793,7 @@ func TestRun(t *testing.T) {
 		{
 			name:        "json flag renders machine readable output only",
 			flags:       []string{"--json"},
-			wantCode:    0,
+			wantCode:    exitFindings,
 			wantAnalyze: true,
 			content:     "---\nname: test skill\ndescription: a test skill\n---\nRun ./scripts/racing.sh before answering.",
 			analyzer: scanner.AnalyzerFunc(func(*skill.Skill) (result.Result, error) {
@@ -838,7 +958,7 @@ func TestRunMultipleFiles(t *testing.T) {
 				{name: "CLEANSKILL.md", content: clean},
 				{name: "HIDDENBASHSKILL.md", content: hidden},
 			},
-			wantCode:    0,
+			wantCode:    exitFindings,
 			wantHeaders: []string{"CLEANSKILL.md", "HIDDENBASHSKILL.md"},
 			wantStdout: []string{
 				"THIS SKILL APPEARS TO BE CLEAN",
@@ -856,7 +976,7 @@ func TestRunMultipleFiles(t *testing.T) {
 				{name: "notes.txt", content: "not a skill"},
 			},
 			scanDirectory:     true,
-			wantCode:          0,
+			wantCode:          exitFindings,
 			wantHeaders:       []string{"CLEANSKILL.md", "HIDDENBASHSKILL.md"},
 			wantMissing:       []string{"notes.txt"},
 			wantReportFiles:   []string{"skill-wiz-report.html"},
@@ -869,7 +989,7 @@ func TestRunMultipleFiles(t *testing.T) {
 				{name: "broken.md", content: "no frontmatter here"},
 			},
 			scanDirectory: true,
-			wantCode:      1,
+			wantCode:      exitFailure,
 			wantHeaders:   []string{"CLEANSKILL.md"},
 			wantStdout:    []string{"THIS SKILL APPEARS TO BE CLEAN"},
 			wantStderr: []string{
@@ -880,6 +1000,23 @@ func TestRunMultipleFiles(t *testing.T) {
 			wantReportContent: []string{"example skill"},
 		},
 		{
+			name: "a scan failure outranks findings in the same run",
+			files: []skillFile{
+				{name: "HIDDENBASHSKILL.md", content: hidden},
+				{name: "broken.md", content: "no frontmatter here"},
+			},
+			scanDirectory: true,
+			wantCode:      exitFailure,
+			wantHeaders:   []string{"HIDDENBASHSKILL.md"},
+			wantStdout:    []string{"[error] shell (rule): skill references local shell script execution"},
+			wantStderr: []string{
+				"broken.md",
+				"invalid skill format",
+			},
+			wantReportFiles:   []string{"skill-wiz-report.html"},
+			wantReportContent: []string{"harmless skill"},
+		},
+		{
 			name: "json mode emits one report per file",
 			files: []skillFile{
 				{name: "CLEANSKILL.md", content: clean},
@@ -887,7 +1024,7 @@ func TestRunMultipleFiles(t *testing.T) {
 			},
 			scanDirectory:     true,
 			flags:             []string{"--json"},
-			wantCode:          0,
+			wantCode:          exitFindings,
 			wantJSONFiles:     []string{"CLEANSKILL.md", "HIDDENBASHSKILL.md"},
 			wantMissing:       []string{"Open it in your browser"},
 			wantReportFiles:   []string{"skill-wiz-report.html"},
