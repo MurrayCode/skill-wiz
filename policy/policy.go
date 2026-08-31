@@ -36,6 +36,15 @@ const FileName = ".skill-wiz.yaml"
 // the load rather than silently doing nothing — the realistic way to lose an
 // enforcement is a typo, not a hostile edit.
 type document struct {
+	Rules    map[string]ruleConfig `yaml:"rules"`
+	Require  []string              `yaml:"require"`
+	Profiles map[string]profile    `yaml:"profiles"`
+}
+
+// profile is one named variation on the base policy. It carries the same keys
+// as the base and, deliberately, no profiles of its own: profiles do not
+// inherit from each other, so there is exactly one overlay to reason about.
+type profile struct {
 	Rules   map[string]ruleConfig `yaml:"rules"`
 	Require []string              `yaml:"require"`
 }
@@ -50,6 +59,7 @@ type ruleConfig struct {
 // no-policy case and enables everything.
 type Policy struct {
 	path    string
+	profile string
 	rules   map[string]ruleConfig
 	require []string
 }
@@ -74,10 +84,19 @@ func Discover(directory string) string {
 	return path
 }
 
-// Load reads and parses a policy file. It checks the document's shape only;
-// whether the rules it names exist is Validate's job, because only the caller
-// knows the active rule set.
+// Load reads and parses a policy file, selecting no profile.
 func Load(path string) (Policy, error) {
+	return LoadProfile(path, "")
+}
+
+// LoadProfile reads a policy file and resolves it against a named profile. It
+// checks the document's shape only; whether the rules it names exist is
+// Validate's job, because only the caller knows the active rule set.
+//
+// Naming a profile the file does not define is a failure rather than a silent
+// fall back to the base, because the realistic case is a broken CI
+// configuration that would otherwise enforce the wrong rules quietly.
+func LoadProfile(path string, name string) (Policy, error) {
 	content, err := os.ReadFile(path)
 	if err != nil {
 		return Policy{}, fmt.Errorf("read policy %s: %w", path, err)
@@ -97,7 +116,57 @@ func Load(path string) (Policy, error) {
 		return Policy{}, fmt.Errorf("parse policy %s: must be a single YAML document", path)
 	}
 
-	return Policy{path: path, rules: parsed.Rules, require: parsed.Require}, nil
+	resolved := Policy{path: path, rules: parsed.Rules, require: parsed.Require}
+	if name == "" {
+		return resolved, nil
+	}
+
+	selected, ok := parsed.Profiles[name]
+	if !ok {
+		if len(parsed.Profiles) == 0 {
+			return Policy{}, fmt.Errorf("policy %s: profile %q was requested but the policy defines no profiles", path, name)
+		}
+
+		return Policy{}, fmt.Errorf("policy %s: unknown profile %q (available profiles: %s)", path, name, strings.Join(profileNames(parsed.Profiles), ", "))
+	}
+
+	return resolved.overlay(name, selected), nil
+}
+
+// overlay applies a profile on top of the base policy. The overlay is key by
+// key and never a merge: a rule the profile names takes the profile's entry
+// whole, a rule it does not name keeps the base's, and a require list replaces
+// the base's outright. Merging would make a profile's effect depend on what the
+// base happened to say, which is exactly what makes layered configuration hard
+// to reason about.
+func (p Policy) overlay(name string, selected profile) Policy {
+	overlaid := Policy{path: p.path, profile: name, require: p.require}
+
+	overlaid.rules = make(map[string]ruleConfig, len(p.rules)+len(selected.Rules))
+	for id, config := range p.rules {
+		overlaid.rules[id] = config
+	}
+	for id, config := range selected.Rules {
+		overlaid.rules[id] = config
+	}
+
+	if selected.Require != nil {
+		overlaid.require = selected.Require
+	}
+
+	return overlaid
+}
+
+// profileNames lists the profiles a document defines, sorted so the failure
+// message reads the same on every run.
+func profileNames(profiles map[string]profile) []string {
+	names := make([]string, 0, len(profiles))
+	for name := range profiles {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	return names
 }
 
 // Loaded reports whether a policy file backs this Policy.
@@ -108,6 +177,12 @@ func (p Policy) Loaded() bool {
 // Path reports where the policy was loaded from, empty for the zero Policy.
 func (p Policy) Path() string {
 	return p.path
+}
+
+// Profile reports which profile was applied, empty when the base policy is in
+// force.
+func (p Policy) Profile() string {
+	return p.profile
 }
 
 // Enabled reports whether a rule should run. A rule the policy says nothing

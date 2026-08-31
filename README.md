@@ -140,6 +140,7 @@ skill-wiz ~/.claude/skills ./team-skills              # directories and files to
 | `--fail-on` | `error` | Lowest finding severity that fails the run: `error`, `warning`, or `info` |
 | `--concurrency` | `8` | How many files to scan at once |
 | `--policy` | — | Path to a policy file; defaults to `.skill-wiz.yaml` in the working directory |
+| `--profile` | — | Policy profile to apply; the base policy is used when omitted |
 
 One unreadable or unparseable file never hides the rest: it is reported on stderr and the run
 carries on. However many files a run covers, it writes one HTML report.
@@ -187,6 +188,46 @@ rule ID that does not exist, or a `require` entry the policy itself disables all
 policy path in the message. None of them is a finding — the scan never starts. `require` exists so
 that a rule renamed or removed by a refactor fails loudly instead of quietly no longer being
 enforced.
+
+#### Profiles
+
+One policy file can define named profiles for the contexts a team scans in — shell execution
+tolerated on a developer's machine, forbidden in CI:
+
+```yaml
+# .skill-wiz.yaml
+rules:
+  shell-command:
+    enabled: false
+profiles:
+  ci:
+    rules:
+      shell-command:
+        enabled: true
+    require:
+      - shell-script
+      - shell-command
+```
+
+```bash
+skill-wiz ~/.claude/skills                    # base policy: shell-command off
+skill-wiz --profile ci --fail-on warning .    # ci profile: shell-command back on and required
+```
+
+`--profile <name>` is the only way to select one. There is **no auto-detection** from `CI`, `ENV`, or
+any other environment variable, for the same reason discovery does not search upwards: a scanner that
+quietly changes its verdict depending on where it runs is worse than one that makes you say which
+rules you want.
+
+The base applies first and the profile overlays it **key by key, never merging**. A rule the profile
+names takes the profile's entry whole — so naming a rule and saying nothing about it returns that
+rule to its default — a rule the profile does not name keeps the base's entry, and a profile
+`require` list replaces the base's outright. Profiles do not inherit from one another; there is
+exactly one overlay to reason about.
+
+Naming a profile the file does not define fails the run and lists the profiles that do exist, rather
+than falling back to the base and quietly enforcing the wrong rules. So does `--profile` with no
+policy file at all.
 
 ### Exit codes
 

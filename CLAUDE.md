@@ -57,9 +57,10 @@ Data flows one way, and every layer returns findings rather than printing:
 - **`scanner`** orchestrates. It owns the `Analyzer` interface
   (`Analyze(*skill.Skill) (result.Result, error)`) and `AnalyzerFunc`, so the LLM is optional and
   swappable.
-- **`policy`** loads the optional `.skill-wiz.yaml` that decides which rules a run enforces. `Load`
-  parses one document with strict field checking, `Discover` looks in a single directory, and
-  `Validate` checks the rule IDs a policy names against the active rule set. It imports neither
+- **`policy`** loads the optional `.skill-wiz.yaml` that decides which rules a run enforces.
+  `LoadProfile` parses one document with strict field checking and resolves the base against a named
+  profile (`Load` is the no-profile case), `Discover` looks in a single directory, and `Validate`
+  checks the rule IDs a policy names against the active rule set. It imports neither
   `rules` nor `skill` — rule identities arrive as strings, and `main` filters its own rule set
   through `Enabled`.
 - **`discover`** expands the CLI paths into files to scan. A named file is taken as given whatever
@@ -95,6 +96,11 @@ Data flows one way, and every layer returns findings rather than printing:
   it learns nothing about configuration. Discovery is `--policy` first, then `.skill-wiz.yaml` in
   `policyDirectory()` (a test seam over `os.Getwd`); an explicit path that does not exist is a
   failure, an undiscovered one is an ordinary policy-free run.
+- **Profile resolution is an overlay, not a merge, and stays inside `policy`.** `Policy.overlay`
+  replaces the base's entry for every rule the profile names, keeps the base's for the rest, and
+  swaps the whole `require` list when the profile sets one. Profiles do not nest — the `profile`
+  struct has no `profiles` field, so strict decoding rejects one. Everything downstream of
+  resolution consumes a single effective `Policy` and never learns that profiles exist.
 
 - **Validation short-circuits.** If `Validate` fails, `scanFile` returns those findings *without*
   running rules or the LLM.

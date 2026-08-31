@@ -86,6 +86,7 @@ type options struct {
 	failOn      result.Severity
 	concurrency int
 	policy      string
+	profile     string
 }
 
 func (o options) analyzerConfig() analyse.Config {
@@ -117,7 +118,7 @@ func run(args []string, stdout io.Writer, stderr io.Writer, terminal bool) int {
 	// A policy that cannot be read, parsed, or validated stops the run before
 	// anything is scanned. Carrying on with a rule set the operator did not ask
 	// for would report a verdict nobody configured.
-	activeRules, err := rulesForRun(opts.policy)
+	activeRules, err := rulesForRun(opts.policy, opts.profile)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return exitFailure
@@ -296,8 +297,8 @@ func scanError(path string, err error, total int) string {
 // rulesForRun resolves the policy for a run and filters the rule set through
 // it. Policy resolution lives here rather than in scanner or rules: the scanner
 // still takes a rule slice and knows nothing about configuration.
-func rulesForRun(requested string) ([]rules.Rule, error) {
-	active, err := loadPolicy(requested)
+func rulesForRun(requested string, profile string) ([]rules.Rule, error) {
+	active, err := loadPolicy(requested, profile)
 	if err != nil {
 		return nil, err
 	}
@@ -312,9 +313,9 @@ func rulesForRun(requested string) ([]rules.Rule, error) {
 // failure when it does not exist, because the operator asked for that file by
 // name. Otherwise the working directory is checked, and finding nothing there
 // is an ordinary policy-free run.
-func loadPolicy(requested string) (policy.Policy, error) {
+func loadPolicy(requested string, profile string) (policy.Policy, error) {
 	if requested != "" {
-		return policy.Load(requested)
+		return policy.LoadProfile(requested, profile)
 	}
 
 	directory, err := policyDirectory()
@@ -324,10 +325,17 @@ func loadPolicy(requested string) (policy.Policy, error) {
 
 	discovered := policy.Discover(directory)
 	if discovered == "" {
+		// A profile only exists inside a policy file, so asking for one when
+		// there is no policy is a broken configuration rather than a run with
+		// nothing configured.
+		if profile != "" {
+			return policy.Policy{}, fmt.Errorf("profile %q was requested but no policy file was found (looked for %s in %s)", profile, policy.FileName, directory)
+		}
+
 		return policy.Policy{}, nil
 	}
 
-	return policy.Load(discovered)
+	return policy.LoadProfile(discovered, profile)
 }
 
 // enabledRules keeps the rule order the default set declares, so console and
@@ -360,6 +368,7 @@ func parseOptions(args []string, stderr io.Writer) (options, error) {
 	failOn := flags.String("fail-on", string(result.SeverityError), "lowest finding severity that fails the run: error, warning, or info")
 	concurrency := flags.Int("concurrency", defaultConcurrency, "how many files to scan at once; --timeout still bounds each analysis request individually")
 	policyPath := flags.String("policy", "", "path to a policy file; defaults to "+policy.FileName+" in the working directory when one is present")
+	profileName := flags.String("profile", "", "name of the policy profile to apply; the base policy is used when omitted")
 
 	if err := flags.Parse(args); err != nil {
 		printUsage(flags, stderr)
@@ -395,6 +404,7 @@ func parseOptions(args []string, stderr io.Writer) (options, error) {
 		failOn:      threshold,
 		concurrency: *concurrency,
 		policy:      strings.TrimSpace(*policyPath),
+		profile:     strings.TrimSpace(*profileName),
 	}, nil
 }
 

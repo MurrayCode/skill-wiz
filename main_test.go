@@ -103,6 +103,18 @@ func TestParseOptions(t *testing.T) {
 			},
 		},
 		{
+			name: "profile name is parsed and trimmed",
+			args: []string{"--profile", " ci ", "skill.md"},
+			want: options{
+				paths:       []string{"skill.md"},
+				model:       analyse.DefaultModel,
+				timeout:     analyse.DefaultTimeout,
+				failOn:      result.SeverityError,
+				concurrency: defaultConcurrency,
+				profile:     "ci",
+			},
+		},
+		{
 			name: "policy path is parsed and trimmed",
 			args: []string{"--policy", " ./team.yaml ", "skill.md"},
 			want: options{
@@ -1849,5 +1861,114 @@ func TestEnabledRules(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestRunWithPolicyProfiles(t *testing.T) {
+	const document = `rules:
+  shell-script:
+    enabled: false
+profiles:
+  ci:
+    rules:
+      shell-script:
+        enabled: true
+  local:
+    rules:
+      shell-script:
+        enabled: false
+      description-mismatch:
+        enabled: false
+`
+	const scriptFinding = "skill references local shell script execution"
+	const mismatchFinding = "skill instructions diverge from declared purpose"
+
+	tests := []struct {
+		name        string
+		profile     string
+		wantCode    int
+		wantOutput  []string
+		wantMissing []string
+	}{
+		{
+			name:        "no profile uses the base policy",
+			wantCode:    exitClean,
+			wantOutput:  []string{mismatchFinding},
+			wantMissing: []string{scriptFinding},
+		},
+		{
+			name:       "the ci profile re-enables the rule the base disables",
+			profile:    "ci",
+			wantCode:   exitFindings,
+			wantOutput: []string{scriptFinding, mismatchFinding},
+		},
+		{
+			name:        "the local profile disables both rules",
+			profile:     "local",
+			wantCode:    exitClean,
+			wantMissing: []string{scriptFinding, mismatchFinding},
+		},
+		{
+			name:        "an unknown profile fails the run and lists the ones that exist",
+			profile:     "staging",
+			wantCode:    exitFailure,
+			wantOutput:  []string{`unknown profile "staging" (available profiles: ci, local)`},
+			wantMissing: []string{scriptFinding, mismatchFinding},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+
+			reportDestination := filepath.Join(t.TempDir(), "skill-wiz-report.html")
+			originalReportPath := reportPath
+			reportPath = func() (string, error) { return reportDestination, nil }
+			defer func() { reportPath = originalReportPath }()
+
+			path := filepath.Join(t.TempDir(), policy.FileName)
+			if err := os.WriteFile(path, []byte(document), 0o644); err != nil {
+				t.Fatalf("os.WriteFile() error = %v", err)
+			}
+
+			args := []string{"--policy", path}
+			if tt.profile != "" {
+				args = append(args, "--profile", tt.profile)
+			}
+			args = append(args, "examples/HIDDENBASHSKILL.md")
+
+			gotCode := run(args, &stdout, &stderr, false)
+
+			if gotCode != tt.wantCode {
+				t.Fatalf("run() code = %d, want %d", gotCode, tt.wantCode)
+			}
+
+			combined := stdout.String() + stderr.String()
+			for _, want := range tt.wantOutput {
+				if !strings.Contains(combined, want) {
+					t.Fatalf("run() output = %q, want substring %q", combined, want)
+				}
+			}
+			for _, missing := range tt.wantMissing {
+				if strings.Contains(combined, missing) {
+					t.Fatalf("run() output = %q, want no substring %q", combined, missing)
+				}
+			}
+		})
+	}
+}
+
+func TestRunRejectsAProfileWithoutAPolicy(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	got := run([]string{"--profile", "ci", "examples/CLEANSKILL.md"}, &stdout, &stderr, false)
+
+	if got != exitFailure {
+		t.Fatalf("run() code = %d, want %d", got, exitFailure)
+	}
+	if !strings.Contains(stderr.String(), `profile "ci" was requested but no policy file was found`) {
+		t.Fatalf("run() stderr = %q, want it to explain that no policy file was found", stderr.String())
 	}
 }
