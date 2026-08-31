@@ -9,13 +9,13 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/murraycode/skill-wiz/analyse"
 	"github.com/murraycode/skill-wiz/discover"
+	"github.com/murraycode/skill-wiz/render"
 	"github.com/murraycode/skill-wiz/report"
 	"github.com/murraycode/skill-wiz/result"
 	"github.com/murraycode/skill-wiz/rules"
@@ -34,40 +34,10 @@ const (
 	exitFindings = 2
 )
 
-// analysisSkippedWarning is printed once per run, not once per file, when the
-// analysis leg has no credential to run with.
-const analysisSkippedWarning = "Warning: analysis leg skipped — GEMINI_API_KEY is not set, so this run used the deterministic rules only."
-
 // defaultConcurrency bounds how many files are scanned at once. The work is
 // network-bound rather than CPU-bound, so the right default follows what the
 // API tolerates, not how many cores the machine has.
 const defaultConcurrency = 8
-
-// maxEvidenceRunes bounds an evidence summary in the console. The HTML report
-// keeps the full text, so truncating here loses nothing.
-const maxEvidenceRunes = 200
-
-// ANSI colours for severity labels. Only the label is coloured, so the rest of
-// a finding line stays greppable.
-const (
-	colorReset   = "\x1b[0m"
-	colorError   = "\x1b[31m"
-	colorWarning = "\x1b[33m"
-	colorInfo    = "\x1b[36m"
-)
-
-var severityColor = map[result.Severity]string{
-	result.SeverityError:   colorError,
-	result.SeverityWarning: colorWarning,
-	result.SeverityInfo:    colorInfo,
-}
-
-// renderStyle carries the presentation decisions taken in main. run writes to
-// an io.Writer, so whether stdout is a terminal has to arrive as a value rather
-// than be sniffed from inside the render path.
-type renderStyle struct {
-	color bool
-}
 
 // colorEnabled decides whether severity labels are coloured. Colour is opt-out
 // twice over: --no-color and the NO_COLOR convention both silence it, and a
@@ -145,7 +115,7 @@ func run(args []string, stdout io.Writer, stderr io.Writer, terminal bool) int {
 	var analyzer scanner.Analyzer
 	analysisSkipped := !analyse.HasAPIKey()
 	if analysisSkipped {
-		fmt.Fprintln(stderr, analysisSkippedWarning)
+		fmt.Fprintln(stderr, render.AnalysisSkippedWarning)
 	} else {
 		analyzer = newSkillAnalyzer(opts.analyzerConfig())
 	}
@@ -187,9 +157,9 @@ func run(args []string, stdout io.Writer, stderr io.Writer, terminal bool) int {
 	}
 
 	if analysisSkipped {
-		fmt.Fprint(stdout, renderAnalysisSkippedNote())
+		fmt.Fprint(stdout, render.AnalysisSkippedNote())
 	}
-	fmt.Fprint(stdout, renderScans(scans, len(files), renderStyle{color: colorEnabled(terminal, opts.noColor)}))
+	fmt.Fprint(stdout, render.Scans(renderInputs(scans), len(files), render.Style{Color: colorEnabled(terminal, opts.noColor)}))
 	if destination != "" {
 		fmt.Fprint(stdout, renderReportPointer(destination))
 	}
@@ -408,10 +378,15 @@ func writeReport(scans []fileScan, analysisSkipped bool, stderr io.Writer) strin
 	return destination
 }
 
-// renderAnalysisSkippedNote heads a rules-only run so its output cannot be
-// mistaken for a complete one.
-func renderAnalysisSkippedNote() string {
-	return analysisSkippedWarning + "\n\n"
+// renderInputs maps completed scans onto what the console renderer needs. The
+// renderer never reads the parsed skill, so it never receives one.
+func renderInputs(scans []fileScan) []render.Input {
+	inputs := make([]render.Input, 0, len(scans))
+	for _, scan := range scans {
+		inputs = append(inputs, render.Input{Path: scan.path, Result: scan.result})
+	}
+
+	return inputs
 }
 
 func renderReportPointer(destination string) string {
@@ -532,142 +507,6 @@ func newJSONReport(input jsonInput) jsonReport {
 	}
 
 	return payload
-}
-
-// renderScans renders every scan in order. A run over a single file renders
-// exactly as it did before multi-file support; a run over several files heads
-// each result with its path, so findings keep their file even when some of the
-// files failed to scan.
-func renderScans(scans []fileScan, total int, style renderStyle) string {
-	var builder strings.Builder
-	for index, scan := range scans {
-		if total > 1 {
-			if index > 0 {
-				builder.WriteString("\n")
-			}
-			fmt.Fprintf(&builder, "=== %s ===\n", scan.path)
-		}
-
-		builder.WriteString(renderResult(scan.result, style))
-	}
-
-	rendered := builder.String()
-	if total <= 1 {
-		return rendered
-	}
-
-	// The clean verdict carries no newline of its own, so close the last
-	// section before the tally rather than running on from it.
-	if rendered != "" && !strings.HasSuffix(rendered, "\n") {
-		rendered += "\n"
-	}
-
-	return rendered + "\n" + renderTally(scans) + "\n"
-}
-
-// renderTally closes a multi-file run with counts that match the findings
-// printed above it. Aggregation by category belongs to the summary story, not
-// here.
-func renderTally(scans []fileScan) string {
-	counts := make(map[result.Severity]int)
-	clean, flagged, findings := 0, 0, 0
-	for _, scan := range scans {
-		if scan.result.Clean() {
-			clean++
-		} else {
-			flagged++
-		}
-		for _, finding := range scan.result.Findings {
-			findings++
-			counts[finding.Severity]++
-		}
-	}
-
-	tally := fmt.Sprintf("%s scanned · %d clean · %d flagged · %s",
-		result.Pluralize(len(scans), "file"), clean, flagged, result.Pluralize(findings, "finding"))
-	if breakdown := severityBreakdown(counts); breakdown != "" {
-		tally += " (" + breakdown + ")"
-	}
-
-	return tally
-}
-
-// severityBreakdown lists the known severities that actually occurred, highest
-// first. An unrecognised severity still counts towards the total; it just has
-// no bucket to sit in.
-func severityBreakdown(counts map[result.Severity]int) string {
-	parts := make([]string, 0, 3)
-	for _, severity := range result.Severities() {
-		if count := counts[severity]; count > 0 {
-			parts = append(parts, fmt.Sprintf("%d %s", count, severity))
-		}
-	}
-
-	return strings.Join(parts, ", ")
-}
-
-func renderResult(scanResult result.Result, style renderStyle) string {
-	if scanResult.Clean() {
-		return analyseCleanMessage()
-	}
-
-	var builder strings.Builder
-	fmt.Fprintf(&builder, "Scan flagged %d finding(s)", len(scanResult.Findings))
-	if sources := scanResult.Sources(); len(sources) > 0 {
-		fmt.Fprintf(&builder, " from %s checks", result.FormatSources(sources))
-	}
-	builder.WriteString("\n")
-	for _, finding := range orderedFindings(scanResult.Findings) {
-		fmt.Fprintf(&builder, "%s %s (%s): %s\n", severityLabel(finding.Severity, style), finding.Category, finding.Source, finding.Message)
-		if finding.Evidence.Summary != "" {
-			fmt.Fprintf(&builder, "Evidence: %s\n", truncateEvidence(finding.Evidence.Summary))
-		}
-	}
-
-	return builder.String()
-}
-
-// orderedFindings sorts a copy for display, highest severity first. The sort is
-// stable so rule findings stay ahead of analyzer ones within a severity, and it
-// works on a copy so result.Result — and therefore the JSON contract — keeps
-// its merge order.
-func orderedFindings(findings []result.Finding) []result.Finding {
-	ordered := make([]result.Finding, len(findings))
-	copy(ordered, findings)
-	sort.SliceStable(ordered, func(i, j int) bool {
-		return result.DisplayRank(ordered[i].Severity) < result.DisplayRank(ordered[j].Severity)
-	})
-
-	return ordered
-}
-
-func severityLabel(severity result.Severity, style renderStyle) string {
-	label := fmt.Sprintf("[%s]", severity)
-	if !style.color {
-		return label
-	}
-
-	color, ok := severityColor[severity]
-	if !ok {
-		return label
-	}
-
-	return color + label + colorReset
-}
-
-// truncateEvidence keeps a long snippet from swamping the console. The HTML
-// report still carries the full text.
-func truncateEvidence(summary string) string {
-	runes := []rune(summary)
-	if len(runes) <= maxEvidenceRunes {
-		return summary
-	}
-
-	return string(runes[:maxEvidenceRunes]) + "…"
-}
-
-func analyseCleanMessage() string {
-	return "THIS SKILL APPEARS TO BE CLEAN, PLEASE MANUALLY VERIFY TO BE SURE"
 }
 
 func validationResultForSkill(s *skill.Skill) result.Result {

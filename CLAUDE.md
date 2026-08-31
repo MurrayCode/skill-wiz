@@ -34,7 +34,7 @@ seam. Keep it that way when adding tests.
 
 Data flows one way, and every layer returns findings rather than printing:
 
-`main.run` → `discover.Files` → `main.scanFiles` (bounded pool) → per file: `main.scanFile` (`skill.Parse` → `Skill.Validate` → `scanner.Scan` → (`rules.Scan` + `analyse.GeminiAnalyzer`) → `result.Merge`) → `main.renderScans` + `report.Write`
+`main.run` → `discover.Files` → `main.scanFiles` (bounded pool) → per file: `main.scanFile` (`skill.Parse` → `Skill.Validate` → `scanner.Scan` → (`rules.Scan` + `analyse.GeminiAnalyzer`) → `result.Merge`) → `render.Scans` + `report.Write`
 
 - **`result`** is the leaf package and the common currency. `Finding` carries `Source`
   (`validation` | `rule` | `analyzer`), `Category`, `Severity`, `Message`, `Evidence`; `Result` wraps
@@ -59,6 +59,12 @@ Data flows one way, and every layer returns findings rather than printing:
   its extension; a directory is walked for `.md` files, skipping hidden entries so `.git` never
   reaches the scanner. Explicit paths keep argument order, directory matches are sorted, duplicates
   collapse, and an empty expansion is `ErrNoSkillFiles`. It knows nothing about skill content.
+- **`render`** owns the console output: `Scans` for a whole run, `Result` for one scan, plus the
+  severity labels, colour constants, tally, and evidence truncation. Like `report` it imports
+  `result` only — no `skill`, `rules`, `scanner`, or `analyse`, no `flag`, no filesystem, and never
+  `os.Stdout`. `main` maps `fileScan` onto `render.Input` (path plus result) and decides colour,
+  which arrives as a `render.Style` value. JSON stays in `main`: it is an output contract, not
+  console presentation.
 - **`report`** renders a run into one self-contained HTML page from the embedded
   `report/template.html`. `Render`/`Write` are variadic over `Input` (one per scanned skill): a single
   skill renders exactly as before, several render as stacked `.skill` sections plus a `<select>`
@@ -69,7 +75,8 @@ Data flows one way, and every layer returns findings rather than printing:
   `run(args, stdout, stderr, terminal) int`. `parseOptions` returns `options` (`paths`, `json`,
   `noColor`, `model`, `timeout`, `failOn`, `concurrency`) or an error; it prints usage itself and the flag set is silenced with `io.Discard` so
   every failure is reported exactly once. `run` scans each discovered file through `scanFile` into a
-  `fileScan` (`path`, `skill`, `result`), writes the one report, then renders them together. `--json` prints
+  `fileScan` (`path`, `skill`, `result`), writes the one report, then renders them together through
+  `render`. `--json` prints
   the JSON and nothing else — no clean message, no HTML report pointer — so keep that path free of
   stray stdout writes, and treat the JSON field names as a contract (add fields, don't rename them).
 
@@ -102,16 +109,16 @@ Data flows one way, and every layer returns findings rather than printing:
   deliberately — do not collapse them. `result.FormatSources` and `result.Pluralize` live there for
   the same reason: `main` and `report` both need them and `result` is the leaf package. No package
   should grow a severity table of its own.
-- **Presentation lives at render time only.** `renderResult` sorts a *copy* of the findings by
+- **Presentation lives at render time only.** `render.Result` sorts a *copy* of the findings by
   `result.DisplayRank` (error → warning → info, unknown last) and truncates evidence past
   `maxEvidenceRunes`; `result.Result` keeps its merge order and the JSON and HTML paths keep the
   full text. Sorting is stable, so rule findings stay ahead of analyzer findings within a severity.
 - **Colour is a value, not a lookup.** `main` decides with `isTerminal(os.Stdout)` and passes it
   into `run`, which folds in `--no-color` and `NO_COLOR` via `colorEnabled` and hands the renderer a
-  `renderStyle`. Never sniff `os.Stdout` inside the render path — the tests write to buffers, and
+  `render.Style`. Never sniff `os.Stdout` inside the `render` package — the tests write to buffers, and
   colour must stay absent there. Only the severity label is coloured, so the rest of a line stays
   greppable.
-- **The tally is multi-file only.** `renderScans` closes a run over more than one file with one
+- **The tally is multi-file only.** `render.Scans` closes a run over more than one file with one
   `N files scanned · … · N findings (…)` line counting the files it actually scanned. A single-file
   run prints nothing extra, so its output is unchanged.
 - **Exit codes are a three-way contract.** `0` clean, `1` operational failure (usage, discovery,

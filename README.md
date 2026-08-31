@@ -291,13 +291,14 @@ The rule heuristics are keyword-based and tuned against those three — retune o
 ### Layout
 
 ```text
-main.go     flag parsing, wiring, rendering
+main.go     flag parsing, wiring, orchestration, JSON
 discover/   expands CLI paths into the skill files to scan
 skill/      frontmatter parsing and validation
 rules/      deterministic checks
 analyse/    Gemini client and prompt hardening
 scanner/    orchestration; owns the Analyzer seam
-result/     Finding and Result — the common currency
+result/     Finding and Result — the common currency, and the severity vocabulary
+render/     console output
 report/     self-contained HTML rendering
 docs/       proposal.md roadmap and the story backlog
 ```
