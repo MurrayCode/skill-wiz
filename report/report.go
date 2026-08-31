@@ -33,6 +33,9 @@ type Input struct {
 	SourcePath       string
 	GeneratedAt      time.Time
 	Result           result.Result
+	// AnalysisSkipped marks a result produced by the deterministic rules alone,
+	// so the page cannot be read as a complete scan.
+	AnalysisSkipped bool
 }
 
 // Write renders the report for a whole run and saves it to destination,
@@ -85,6 +88,7 @@ type skillView struct {
 	SourcePath       string
 	GeneratedAt      string
 	Sources          string
+	AnalysisSkipped  bool
 	Verdict          string
 	VerdictDetail    string
 	VerdictTone      string
@@ -181,6 +185,7 @@ func newSkillView(input Input) skillView {
 		SourcePath:       input.SourcePath,
 		GeneratedAt:      timestamp(input.GeneratedAt),
 		Sources:          formatSources(input.Result.Sources()),
+		AnalysisSkipped:  input.AnalysisSkipped,
 		Counts:           severityCounts(findings),
 		Findings:         make([]findingView, 0, len(findings)),
 	}

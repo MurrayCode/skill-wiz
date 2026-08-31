@@ -40,7 +40,25 @@ When issues are found, return:
 Do not include markdown fences, prose, or extra fields.`
 )
 
-var errMissingAPIKey = errors.New("missing GEMINI_API_KEY")
+// apiKeyEnvVar names the credential the analysis leg needs. It lives here
+// because this package owns the model call; callers preflight through HasAPIKey
+// rather than reading the environment themselves.
+const apiKeyEnvVar = "GEMINI_API_KEY"
+
+var errMissingAPIKey = errors.New("missing " + apiKeyEnvVar)
+
+// HasAPIKey reports whether the analysis leg has the credential it needs. It
+// lets a caller check once for a whole run instead of discovering the same
+// missing key on every file. It is an addition, not a replacement: the request
+// path still refuses to run without a key, so the package stays safe when
+// called directly.
+func HasAPIKey() bool {
+	return apiKey() != ""
+}
+
+func apiKey() string {
+	return strings.TrimSpace(os.Getenv(apiKeyEnvVar))
+}
 
 type promptInput struct {
 	Description string `json:"description"`
@@ -107,12 +125,12 @@ func AnalyzeWithConfig(prompt string, config Config) (result.Result, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), config.Timeout)
 	defer cancel()
 
-	apiKey := strings.TrimSpace(os.Getenv("GEMINI_API_KEY"))
-	if apiKey == "" {
+	key := apiKey()
+	if key == "" {
 		return result.Result{}, errMissingAPIKey
 	}
 
-	generator, err := newGenerator(ctx, apiKey)
+	generator, err := newGenerator(ctx, key)
 	if err != nil {
 		return result.Result{}, fmt.Errorf("create genai client: %w", err)
 	}

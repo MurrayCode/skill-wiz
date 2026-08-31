@@ -33,6 +33,10 @@ const (
 	exitFindings = 2
 )
 
+// analysisSkippedWarning is printed once per run, not once per file, when the
+// analysis leg has no credential to run with.
+const analysisSkippedWarning = "Warning: analysis leg skipped — GEMINI_API_KEY is not set, so this run used the deterministic rules only."
+
 // maxEvidenceRunes bounds an evidence summary in the console. The HTML report
 // keeps the full text, so truncating here loses nothing.
 const maxEvidenceRunes = 200
@@ -135,7 +139,18 @@ func run(args []string, stdout io.Writer, stderr io.Writer, terminal bool) int {
 		return exitFailure
 	}
 
-	analyzer := newSkillAnalyzer(opts.analyzerConfig())
+	// Preflight the credential once for the whole run. Without it the analysis
+	// leg cannot run, but the deterministic rules can and must: the project's
+	// design goal is that obvious detections never depend on the model. So warn
+	// once, pass a nil analyzer, and carry on rules-only rather than failing a
+	// file at a time.
+	var analyzer scanner.Analyzer
+	analysisSkipped := !analyse.HasAPIKey()
+	if analysisSkipped {
+		fmt.Fprintln(stderr, analysisSkippedWarning)
+	} else {
+		analyzer = newSkillAnalyzer(opts.analyzerConfig())
+	}
 
 	scans := make([]fileScan, 0, len(files))
 	failed := false
@@ -156,10 +171,10 @@ func run(args []string, stdout io.Writer, stderr io.Writer, terminal bool) int {
 	}
 
 	// One run, one report: every scanned skill lands on the same page.
-	destination := writeReport(scans, stderr)
+	destination := writeReport(scans, analysisSkipped, stderr)
 
 	if opts.json {
-		rendered, err := renderJSON(jsonInputs(scans, destination))
+		rendered, err := renderJSON(jsonInputs(scans, destination, analysisSkipped))
 		if err != nil {
 			fmt.Fprintf(stderr, "failed to render JSON output: %v\n", err)
 			return exitFailure
@@ -169,6 +184,9 @@ func run(args []string, stdout io.Writer, stderr io.Writer, terminal bool) int {
 		return exitCode(scans, failed, opts.failOn)
 	}
 
+	if analysisSkipped {
+		fmt.Fprint(stdout, renderAnalysisSkippedNote())
+	}
 	fmt.Fprint(stdout, renderScans(scans, len(files), renderStyle{color: colorEnabled(terminal, opts.noColor)}))
 	if destination != "" {
 		fmt.Fprint(stdout, renderReportPointer(destination))
@@ -304,7 +322,7 @@ func printUsage(flags *flag.FlagSet, w io.Writer) {
 // writeReport saves the run's HTML report and returns where it landed, or ""
 // when it could not be written. A report that cannot be written is a warning,
 // not a scan failure: the console output already carries every finding.
-func writeReport(scans []fileScan, stderr io.Writer) string {
+func writeReport(scans []fileScan, analysisSkipped bool, stderr io.Writer) string {
 	destination, err := reportPath()
 	if err != nil {
 		fmt.Fprintf(stderr, "failed to resolve HTML report path: %v\n", err)
@@ -319,6 +337,7 @@ func writeReport(scans []fileScan, stderr io.Writer) string {
 			SourcePath:       scan.path,
 			GeneratedAt:      time.Now(),
 			Result:           scan.result,
+			AnalysisSkipped:  analysisSkipped,
 		})
 	}
 
@@ -328,6 +347,12 @@ func writeReport(scans []fileScan, stderr io.Writer) string {
 	}
 
 	return destination
+}
+
+// renderAnalysisSkippedNote heads a rules-only run so its output cannot be
+// mistaken for a complete one.
+func renderAnalysisSkippedNote() string {
+	return analysisSkippedWarning + "\n\n"
 }
 
 func renderReportPointer(destination string) string {
@@ -354,10 +379,11 @@ func defaultReportPath() (string, error) {
 
 // jsonInput is everything renderJSON needs about a completed scan.
 type jsonInput struct {
-	Path       string
-	Skill      *skill.Skill
-	Result     result.Result
-	ReportPath string
+	Path            string
+	Skill           *skill.Skill
+	Result          result.Result
+	ReportPath      string
+	AnalysisSkipped bool
 }
 
 // jsonReport is the stable shape of --json output. Keep field names additive:
@@ -368,6 +394,10 @@ type jsonReport struct {
 	Clean      bool          `json:"clean"`
 	Findings   []jsonFinding `json:"findings"`
 	ReportPath string        `json:"report_path,omitempty"`
+	// AnalysisSkipped marks a rules-only result. It is additive and omitted
+	// from a complete scan, so a consumer written before it keeps working while
+	// one written after it can tell the two apart.
+	AnalysisSkipped bool `json:"analysis_skipped,omitempty"`
 }
 
 type jsonSkill struct {
@@ -385,14 +415,15 @@ type jsonFinding struct {
 
 // jsonInputs pairs every scan with the one report the run wrote, so a consumer
 // reading a single entry still knows where to look.
-func jsonInputs(scans []fileScan, reportPath string) []jsonInput {
+func jsonInputs(scans []fileScan, reportPath string, analysisSkipped bool) []jsonInput {
 	inputs := make([]jsonInput, 0, len(scans))
 	for _, scan := range scans {
 		inputs = append(inputs, jsonInput{
-			Path:       scan.path,
-			Skill:      scan.skill,
-			Result:     scan.result,
-			ReportPath: reportPath,
+			Path:            scan.path,
+			Skill:           scan.skill,
+			Result:          scan.result,
+			ReportPath:      reportPath,
+			AnalysisSkipped: analysisSkipped,
 		})
 	}
 
@@ -422,10 +453,11 @@ func renderJSON(inputs []jsonInput) (string, error) {
 
 func newJSONReport(input jsonInput) jsonReport {
 	payload := jsonReport{
-		Path:       input.Path,
-		Clean:      input.Result.Clean(),
-		Findings:   make([]jsonFinding, 0, len(input.Result.Findings)),
-		ReportPath: input.ReportPath,
+		Path:            input.Path,
+		Clean:           input.Result.Clean(),
+		Findings:        make([]jsonFinding, 0, len(input.Result.Findings)),
+		ReportPath:      input.ReportPath,
+		AnalysisSkipped: input.AnalysisSkipped,
 	}
 	if input.Skill != nil {
 		payload.Skill = jsonSkill{Name: input.Skill.Name, Description: input.Skill.Description}

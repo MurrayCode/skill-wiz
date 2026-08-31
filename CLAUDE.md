@@ -26,7 +26,8 @@ detections never depend on the model.
 - Test one case: `go test ./skill/... -run TestParse/valid_skill`
 
 `GEMINI_API_KEY` must be exported for the LLM leg to run — there is no `.env` loading in code, despite
-`.env` being gitignored. **The test suite never calls the API**; every LLM path sits behind a swappable
+`.env` being gitignored. Without it `run` warns once and scans rules-only rather than failing per
+file; see the preflight invariant below. **The test suite never calls the API**; every LLM path sits behind a swappable
 seam. Keep it that way when adding tests.
 
 ## Architecture
@@ -107,8 +108,15 @@ Data flows one way, and every layer returns findings rather than printing:
   Both the text and JSON branches return the same code. Don't renumber `1`.
 - **The scanner degrades rather than fails.** If the analyzer errors but rules already found
   something, `Scan` returns the rule findings and swallows the error; it propagates the error only
-  when rules were clean (`scanner/scanner.go:38`). So a missing `GEMINI_API_KEY` is fatal only for
+  when rules were clean (`scanner/scanner.go:38`). So an analyzer error is fatal only for
   otherwise-clean skills.
+- **The API key is preflighted once per run, not once per file.** `run` checks `analyse.HasAPIKey`
+  before the scan loop; with no key it prints one warning, passes a **nil** analyzer, and the run is
+  rules-only — a console note, an `analysis` line on the report, and an additive
+  `"analysis_skipped": true` in the JSON say so. The per-call check inside `analyse` stays, so the
+  package is still safe when called directly. `main_test.go` has a `TestMain` that unsets the key, so
+  a test wanting the analysis leg sets a placeholder itself and the suite never depends on the
+  developer's environment.
 - **The HTML report never fails the scan.** `writeReport` warns on stderr and returns; the console
   output already carries every finding. It runs on the validation path too, so a skill missing
   required metadata still gets a report.

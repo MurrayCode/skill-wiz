@@ -194,7 +194,6 @@ func TestDefaultRules(t *testing.T) {
 
 }
 
-
 func TestDefaultRulesFixtureCorpus(t *testing.T) {
 	tests := []struct {
 		name           string

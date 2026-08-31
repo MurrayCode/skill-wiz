@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -591,6 +593,19 @@ func TestExitCode(t *testing.T) {
 	}
 }
 
+// TestMain clears the analyzer credential for the whole package so that no test
+// depends on whether the developer happens to have one exported. A test that
+// wants the analysis leg to run sets a placeholder key itself; the analyzer seam
+// still stands between the suite and the real model.
+func TestMain(m *testing.M) {
+	if err := os.Unsetenv("GEMINI_API_KEY"); err != nil {
+		fmt.Fprintf(os.Stderr, "unset GEMINI_API_KEY: %v\n", err)
+		os.Exit(1)
+	}
+
+	os.Exit(m.Run())
+}
+
 func TestRun(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -848,6 +863,10 @@ func TestRun(t *testing.T) {
 				args = append(append([]string{}, tt.flags...), path)
 			}
 
+			// The analysis leg is available for these cases; the stub below is
+			// what keeps the suite away from the real model.
+			t.Setenv("GEMINI_API_KEY", "test-key")
+
 			var gotConfig analyse.Config
 			analyzer := newSkillAnalyzer
 			scanRules := skillRules
@@ -1060,6 +1079,8 @@ func TestRunMultipleFiles(t *testing.T) {
 					paths = append(paths, path)
 				}
 			}
+
+			t.Setenv("GEMINI_API_KEY", "test-key")
 
 			reportDirectory := t.TempDir()
 			originalReportPath := reportPath
@@ -1557,6 +1578,8 @@ func TestRunColour(t *testing.T) {
 				t.Fatalf("write fixture: %v", err)
 			}
 
+			t.Setenv("GEMINI_API_KEY", "test-key")
+
 			reportDirectory := t.TempDir()
 			originalReportPath := reportPath
 			reportPath = func() (string, error) {
@@ -1582,6 +1605,172 @@ func TestRunColour(t *testing.T) {
 			for _, missing := range tt.wantMissing {
 				if strings.Contains(stdout.String(), missing) {
 					t.Fatalf("run() stdout = %q, want no substring %q", stdout.String(), missing)
+				}
+			}
+		})
+	}
+}
+
+// TestRunWithoutAPIKeyFallsBackToRulesOnly covers the preflight: a run with no
+// credential warns once, scans with the deterministic rules alone, and reports
+// findings rather than a scan failure.
+func TestRunWithoutAPIKeyFallsBackToRulesOnly(t *testing.T) {
+	flagged := "---\nname: racing news\ndescription: links to the latest racing news\n---\nExecute ./scripts/racing.sh to fetch the news.\n"
+	clean := "---\nname: greeting\ndescription: greets the reader politely\n---\nGreet the reader politely and warmly.\n"
+
+	tests := []struct {
+		name            string
+		files           map[string]string
+		flags           []string
+		wantCode        int
+		wantStdout      []string
+		wantStdoutMissi []string
+		wantStderr      []string
+	}{
+		{
+			name:       "single clean file scans rules-only instead of failing",
+			files:      map[string]string{"clean.md": clean},
+			wantCode:   exitClean,
+			wantStdout: []string{"analysis leg skipped", "GEMINI_API_KEY", "THIS SKILL APPEARS TO BE CLEAN"},
+			wantStderr: []string{"GEMINI_API_KEY"},
+		},
+		{
+			name:       "rule findings still gate the exit code",
+			files:      map[string]string{"flagged.md": flagged},
+			wantCode:   exitFindings,
+			wantStdout: []string{"analysis leg skipped", "skill references local shell script execution"},
+		},
+		{
+			name:     "several files warn exactly once",
+			files:    map[string]string{"a.md": clean, "b.md": clean, "c.md": flagged},
+			wantCode: exitFindings,
+		},
+		{
+			name:            "json carries the additive field and nothing else reaches stdout",
+			files:           map[string]string{"flagged.md": flagged},
+			flags:           []string{"--json"},
+			wantCode:        exitFindings,
+			wantStdout:      []string{`"analysis_skipped": true`},
+			wantStdoutMissi: []string{"analysis leg skipped", "HTML report"},
+			wantStderr:      []string{"GEMINI_API_KEY"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("GEMINI_API_KEY", "")
+
+			directory := t.TempDir()
+			names := make([]string, 0, len(tt.files))
+			for name := range tt.files {
+				names = append(names, name)
+			}
+			sort.Strings(names)
+			for _, name := range names {
+				if err := os.WriteFile(filepath.Join(directory, name), []byte(tt.files[name]), 0o600); err != nil {
+					t.Fatalf("write fixture: %v", err)
+				}
+			}
+
+			reportDirectory := t.TempDir()
+			originalReportPath := reportPath
+			reportPath = func() (string, error) {
+				return filepath.Join(reportDirectory, "skill-wiz-report.html"), nil
+			}
+			originalAnalyzer := newSkillAnalyzer
+			newSkillAnalyzer = func(analyse.Config) scanner.Analyzer {
+				t.Fatal("newSkillAnalyzer() called with no GEMINI_API_KEY set")
+				return nil
+			}
+			defer func() {
+				reportPath = originalReportPath
+				newSkillAnalyzer = originalAnalyzer
+			}()
+
+			var stdout, stderr bytes.Buffer
+			gotCode := run(append(append([]string{}, tt.flags...), directory), &stdout, &stderr, false)
+
+			if gotCode != tt.wantCode {
+				t.Fatalf("run() code = %d, want %d (stderr = %q)", gotCode, tt.wantCode, stderr.String())
+			}
+			if got := strings.Count(stderr.String(), "GEMINI_API_KEY"); got != 1 {
+				t.Fatalf("stderr mentions GEMINI_API_KEY %d times, want 1: %q", got, stderr.String())
+			}
+			for _, want := range tt.wantStdout {
+				if !strings.Contains(stdout.String(), want) {
+					t.Fatalf("run() stdout = %q, want substring %q", stdout.String(), want)
+				}
+			}
+			for _, missing := range tt.wantStdoutMissi {
+				if strings.Contains(stdout.String(), missing) {
+					t.Fatalf("run() stdout = %q, want no substring %q", stdout.String(), missing)
+				}
+			}
+			for _, want := range tt.wantStderr {
+				if !strings.Contains(stderr.String(), want) {
+					t.Fatalf("run() stderr = %q, want substring %q", stderr.String(), want)
+				}
+			}
+		})
+	}
+}
+
+// TestRunWithAPIKeyIsUnchanged guards the other half of the preflight: with a
+// key present the run behaves exactly as it did before, with no extra output
+// and no additive JSON field.
+func TestRunWithAPIKeyIsUnchanged(t *testing.T) {
+	tests := []struct {
+		name        string
+		flags       []string
+		wantMissing []string
+	}{
+		{
+			name:        "text output carries no skipped note",
+			wantMissing: []string{"analysis leg skipped", "GEMINI_API_KEY"},
+		},
+		{
+			name:        "json output carries no skipped field",
+			flags:       []string{"--json"},
+			wantMissing: []string{"analysis_skipped"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("GEMINI_API_KEY", "test-key")
+
+			path := filepath.Join(t.TempDir(), "skill.md")
+			content := "---\nname: greeting\ndescription: greets the reader politely\n---\nGreet the reader politely and warmly.\n"
+			if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+				t.Fatalf("write fixture: %v", err)
+			}
+
+			reportDirectory := t.TempDir()
+			originalReportPath := reportPath
+			reportPath = func() (string, error) {
+				return filepath.Join(reportDirectory, "skill-wiz-report.html"), nil
+			}
+			called := false
+			originalAnalyzer := newSkillAnalyzer
+			newSkillAnalyzer = func(analyse.Config) scanner.Analyzer {
+				called = true
+				return cleanAnalyzer()
+			}
+			defer func() {
+				reportPath = originalReportPath
+				newSkillAnalyzer = originalAnalyzer
+			}()
+
+			var stdout, stderr bytes.Buffer
+			run(append(append([]string{}, tt.flags...), path), &stdout, &stderr, false)
+
+			if !called {
+				t.Fatal("newSkillAnalyzer() was not called, want the analysis leg to run")
+			}
+			combined := stdout.String() + stderr.String()
+			for _, missing := range tt.wantMissing {
+				if strings.Contains(combined, missing) {
+					t.Fatalf("run() output = %q, want no substring %q", combined, missing)
 				}
 			}
 		})
