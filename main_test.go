@@ -5,10 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -30,58 +33,78 @@ func TestParseOptions(t *testing.T) {
 		{
 			name: "path only uses defaults",
 			args: []string{"skill.md"},
-			want: options{paths: []string{"skill.md"}, model: analyse.DefaultModel, timeout: analyse.DefaultTimeout, failOn: result.SeverityError},
+			want: options{paths: []string{"skill.md"}, model: analyse.DefaultModel, timeout: analyse.DefaultTimeout, failOn: result.SeverityError, concurrency: defaultConcurrency},
 		},
 		{
 			name: "flags are applied before the path",
 			args: []string{"--json", "--model", "gemini-2.5-pro", "--timeout", "15s", "skill.md"},
-			want: options{paths: []string{"skill.md"}, json: true, model: "gemini-2.5-pro", timeout: 15 * time.Second, failOn: result.SeverityError},
+			want: options{paths: []string{"skill.md"}, json: true, model: "gemini-2.5-pro", timeout: 15 * time.Second, failOn: result.SeverityError, concurrency: defaultConcurrency},
 		},
 		{
 			name: "no-color is parsed",
 			args: []string{"--no-color", "skill.md"},
 			want: options{
-				paths:   []string{"skill.md"},
-				noColor: true,
-				model:   analyse.DefaultModel,
-				timeout: analyse.DefaultTimeout,
-				failOn:  result.SeverityError,
+				paths:       []string{"skill.md"},
+				noColor:     true,
+				model:       analyse.DefaultModel,
+				timeout:     analyse.DefaultTimeout,
+				failOn:      result.SeverityError,
+				concurrency: defaultConcurrency,
 			},
 		},
 		{
 			name: "single dash flags are accepted",
 			args: []string{"-json", "-timeout=5s", "skill.md"},
-			want: options{paths: []string{"skill.md"}, json: true, model: analyse.DefaultModel, timeout: 5 * time.Second, failOn: result.SeverityError},
+			want: options{paths: []string{"skill.md"}, json: true, model: analyse.DefaultModel, timeout: 5 * time.Second, failOn: result.SeverityError, concurrency: defaultConcurrency},
 		},
 		{
 			name: "every positional argument becomes a path",
 			args: []string{"first.md", "skills", "second.md"},
 			want: options{
-				paths:   []string{"first.md", "skills", "second.md"},
-				model:   analyse.DefaultModel,
-				timeout: analyse.DefaultTimeout,
-				failOn:  result.SeverityError,
+				paths:       []string{"first.md", "skills", "second.md"},
+				model:       analyse.DefaultModel,
+				timeout:     analyse.DefaultTimeout,
+				failOn:      result.SeverityError,
+				concurrency: defaultConcurrency,
 			},
 		},
 		{
 			name: "fail-on lowers the gate",
 			args: []string{"--fail-on", "warning", "skill.md"},
 			want: options{
-				paths:   []string{"skill.md"},
-				model:   analyse.DefaultModel,
-				timeout: analyse.DefaultTimeout,
-				failOn:  result.SeverityWarning,
+				paths:       []string{"skill.md"},
+				model:       analyse.DefaultModel,
+				timeout:     analyse.DefaultTimeout,
+				failOn:      result.SeverityWarning,
+				concurrency: defaultConcurrency,
 			},
 		},
 		{
 			name: "fail-on is case insensitive and trimmed",
 			args: []string{"--fail-on", " INFO ", "skill.md"},
 			want: options{
-				paths:   []string{"skill.md"},
-				model:   analyse.DefaultModel,
-				timeout: analyse.DefaultTimeout,
-				failOn:  result.SeverityInfo,
+				paths:       []string{"skill.md"},
+				model:       analyse.DefaultModel,
+				timeout:     analyse.DefaultTimeout,
+				failOn:      result.SeverityInfo,
+				concurrency: defaultConcurrency,
 			},
+		},
+		{
+			name: "concurrency is parsed",
+			args: []string{"--concurrency", "3", "skill.md"},
+			want: options{
+				paths:       []string{"skill.md"},
+				model:       analyse.DefaultModel,
+				timeout:     analyse.DefaultTimeout,
+				failOn:      result.SeverityError,
+				concurrency: 3,
+			},
+		},
+		{
+			name:    "non-positive concurrency is rejected",
+			args:    []string{"--concurrency", "0", "skill.md"},
+			wantErr: "invalid -concurrency: must be greater than zero",
 		},
 		{
 			name:    "unknown fail-on severity is rejected",
@@ -267,73 +290,6 @@ func TestRenderJSONMultipleFiles(t *testing.T) {
 	}
 }
 
-func TestRenderScans(t *testing.T) {
-	clean := fileScan{
-		path:   filepath.Join("examples", "CLEANSKILL.md"),
-		result: result.NewCleanResult(),
-	}
-	flagged := fileScan{
-		path: filepath.Join("examples", "HIDDENBASHSKILL.md"),
-		result: result.NewResult(result.Finding{
-			Source:   result.SourceRule,
-			Category: result.Category("shell"),
-			Severity: result.SeverityError,
-			Message:  "skill references local shell script execution",
-			Evidence: result.Evidence{Summary: "./scripts/racing.sh"},
-		}),
-	}
-
-	tests := []struct {
-		name        string
-		scans       []fileScan
-		total       int
-		wants       []string
-		wantMissing []string
-	}{
-		{
-			name:        "a single file is rendered without a path header",
-			scans:       []fileScan{clean},
-			total:       1,
-			wants:       []string{"THIS SKILL APPEARS TO BE CLEAN"},
-			wantMissing: []string{"===", "HTML report:"},
-		},
-		{
-			name:  "several files are headed by their path",
-			scans: []fileScan{clean, flagged},
-			total: 2,
-			wants: []string{
-				"=== " + clean.path + " ===",
-				"THIS SKILL APPEARS TO BE CLEAN",
-				"=== " + flagged.path + " ===",
-				"[error] shell (rule): skill references local shell script execution",
-			},
-		},
-		{
-			name:  "a surviving scan keeps its path when another file failed",
-			scans: []fileScan{flagged},
-			total: 2,
-			wants: []string{"=== " + flagged.path + " ==="},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := renderScans(tt.scans, tt.total, renderStyle{})
-
-			for _, want := range tt.wants {
-				if !strings.Contains(got, want) {
-					t.Fatalf("renderScans() = %q, want substring %q", got, want)
-				}
-			}
-			for _, missing := range tt.wantMissing {
-				if strings.Contains(got, missing) {
-					t.Fatalf("renderScans() = %q, want no substring %q", got, missing)
-				}
-			}
-		})
-	}
-}
-
 func TestValidationResultForSkill(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -393,103 +349,6 @@ func TestValidationResultForSkill(t *testing.T) {
 				}
 				if got.Findings[i].Evidence.Summary != tt.wantEvidence[i] {
 					t.Fatalf("Finding[%d].Evidence.Summary = %q, want %q", i, got.Findings[i].Evidence.Summary, tt.wantEvidence[i])
-				}
-			}
-		})
-	}
-}
-
-func TestRenderValidationResult(t *testing.T) {
-	got := renderResult(result.NewResult(
-		result.Finding{
-			Source:   result.SourceValidation,
-			Category: result.Category("metadata"),
-			Severity: result.SeverityError,
-			Message:  "field name is required",
-			Evidence: result.Evidence{Summary: "missing required field: name"},
-		},
-		result.Finding{
-			Source:   result.SourceValidation,
-			Category: result.Category("metadata"),
-			Severity: result.SeverityError,
-			Message:  "field description is required",
-			Evidence: result.Evidence{Summary: "missing required field: description"},
-		},
-	), renderStyle{})
-
-	wants := []string{
-		"Scan flagged 2 finding(s) from validation checks",
-		"[error] metadata (validation): field name is required",
-		"Evidence: missing required field: name",
-		"[error] metadata (validation): field description is required",
-		"Evidence: missing required field: description",
-	}
-
-	for _, want := range wants {
-		if !strings.Contains(got, want) {
-			t.Fatalf("renderResult() = %q, want substring %q", got, want)
-		}
-	}
-}
-
-func TestRenderResult(t *testing.T) {
-	tests := []struct {
-		name   string
-		result result.Result
-		wants  []string
-	}{
-		{
-			name:   "clean result renders clean message",
-			result: result.NewCleanResult(),
-			wants:  []string{"THIS SKILL APPEARS TO BE CLEAN, PLEASE MANUALLY VERIFY TO BE SURE"},
-		},
-		{
-			name: "flagged result renders finding details",
-			result: result.NewResult(result.Finding{
-				Source:   result.SourceAnalyzer,
-				Category: result.Category("analysis"),
-				Severity: result.SeverityWarning,
-				Message:  "Analyzer reported potential issues",
-				Evidence: result.Evidence{Summary: "SUSPICIOUS: hidden shell execution"},
-			}),
-			wants: []string{
-				"Scan flagged 1 finding(s) from analyzer checks",
-				"[warning] analysis (analyzer): Analyzer reported potential issues",
-				"Evidence: SUSPICIOUS: hidden shell execution",
-			},
-		},
-		{
-			name: "merged result renders both sources in summary",
-			result: result.Merge(
-				result.NewResult(result.Finding{
-					Source:   result.SourceRule,
-					Category: result.Category("shell"),
-					Severity: result.SeverityWarning,
-					Message:  "shell execution found",
-					Evidence: result.Evidence{Summary: "bash command in body"},
-				}),
-				result.NewResult(result.Finding{
-					Source:   result.SourceAnalyzer,
-					Category: result.Category("hidden"),
-					Severity: result.SeverityWarning,
-					Message:  "hidden follow-up action detected",
-					Evidence: result.Evidence{Summary: "model found extra hidden action"},
-				}),
-			),
-			wants: []string{
-				"Scan flagged 2 finding(s) from rule and analyzer checks",
-				"[warning] shell (rule): shell execution found",
-				"[warning] hidden (analyzer): hidden follow-up action detected",
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := renderResult(tt.result, renderStyle{})
-			for _, want := range tt.wants {
-				if !strings.Contains(got, want) {
-					t.Fatalf("renderResult() = %q, want substring %q", got, want)
 				}
 			}
 		})
@@ -567,6 +426,20 @@ func TestExitCode(t *testing.T) {
 			want:      exitFindings,
 		},
 		{
+			// A malformed severity must not fail a build at any threshold, so
+			// even the most permissive one leaves it alone.
+			name:      "an unknown severity does not gate even fail-on info",
+			scans:     []fileScan{flagged(result.Severity("critical"))},
+			threshold: result.SeverityInfo,
+			want:      exitClean,
+		},
+		{
+			name:      "an unknown severity alongside a real finding still gates on the real one",
+			scans:     []fileScan{flagged(result.Severity("critical")), flagged(result.SeverityError)},
+			threshold: result.SeverityError,
+			want:      exitFindings,
+		},
+		{
 			name:      "operational failure outranks findings",
 			scans:     []fileScan{flagged(result.SeverityError)},
 			failed:    true,
@@ -589,6 +462,19 @@ func TestExitCode(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestMain clears the analyzer credential for the whole package so that no test
+// depends on whether the developer happens to have one exported. A test that
+// wants the analysis leg to run sets a placeholder key itself; the analyzer seam
+// still stands between the suite and the real model.
+func TestMain(m *testing.M) {
+	if err := os.Unsetenv("GEMINI_API_KEY"); err != nil {
+		fmt.Fprintf(os.Stderr, "unset GEMINI_API_KEY: %v\n", err)
+		os.Exit(1)
+	}
+
+	os.Exit(m.Run())
 }
 
 func TestRun(t *testing.T) {
@@ -848,6 +734,10 @@ func TestRun(t *testing.T) {
 				args = append(append([]string{}, tt.flags...), path)
 			}
 
+			// The analysis leg is available for these cases; the stub below is
+			// what keeps the suite away from the real model.
+			t.Setenv("GEMINI_API_KEY", "test-key")
+
 			var gotConfig analyse.Config
 			analyzer := newSkillAnalyzer
 			scanRules := skillRules
@@ -1061,6 +951,8 @@ func TestRunMultipleFiles(t *testing.T) {
 				}
 			}
 
+			t.Setenv("GEMINI_API_KEY", "test-key")
+
 			reportDirectory := t.TempDir()
 			originalReportPath := reportPath
 			reportPath = func() (string, error) {
@@ -1190,283 +1082,6 @@ func readFixture(t *testing.T, path string) string {
 	return string(content)
 }
 
-func TestRenderResultOrdersFindingsBySeverity(t *testing.T) {
-	finding := func(source result.Source, severity result.Severity, message string) result.Finding {
-		return result.Finding{
-			Source:   source,
-			Category: result.Category("mixed"),
-			Severity: severity,
-			Message:  message,
-		}
-	}
-
-	tests := []struct {
-		name   string
-		result result.Result
-		want   []string
-	}{
-		{
-			name: "highest severity is printed first",
-			result: result.NewResult(
-				finding(result.SourceRule, result.SeverityInfo, "third"),
-				finding(result.SourceRule, result.SeverityError, "first"),
-				finding(result.SourceRule, result.SeverityWarning, "second"),
-			),
-			want: []string{"first", "second", "third"},
-		},
-		{
-			name: "merge order is kept within a severity",
-			result: result.NewResult(
-				finding(result.SourceRule, result.SeverityWarning, "rule finding"),
-				finding(result.SourceAnalyzer, result.SeverityWarning, "analyzer finding"),
-				finding(result.SourceAnalyzer, result.SeverityError, "analyzer error"),
-			),
-			want: []string{"analyzer error", "rule finding", "analyzer finding"},
-		},
-		{
-			name: "an unknown severity sorts last",
-			result: result.NewResult(
-				finding(result.SourceAnalyzer, result.Severity("critical"), "unknown severity"),
-				finding(result.SourceRule, result.SeverityInfo, "known severity"),
-			),
-			want: []string{"known severity", "unknown severity"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := renderResult(tt.result, renderStyle{})
-
-			previous := -1
-			for _, want := range tt.want {
-				index := strings.Index(got, want)
-				if index < 0 {
-					t.Fatalf("renderResult() = %q, want substring %q", got, want)
-				}
-				if index < previous {
-					t.Fatalf("renderResult() = %q, want %q after the previous finding", got, want)
-				}
-				previous = index
-			}
-		})
-	}
-}
-
-func TestRenderResultDoesNotReorderTheResult(t *testing.T) {
-	scanResult := result.NewResult(
-		result.Finding{Source: result.SourceRule, Category: result.Category("url"), Severity: result.SeverityInfo, Message: "info first"},
-		result.Finding{Source: result.SourceRule, Category: result.Category("shell"), Severity: result.SeverityError, Message: "error second"},
-	)
-
-	renderResult(scanResult, renderStyle{})
-
-	if scanResult.Findings[0].Message != "info first" {
-		t.Fatalf("renderResult() reordered the result: %+v", scanResult.Findings)
-	}
-}
-
-func TestRenderResultTruncatesEvidence(t *testing.T) {
-	tests := []struct {
-		name            string
-		evidence        string
-		wantTruncated   bool
-		wantRuneLength  int
-		wantContainsAll string
-	}{
-		{
-			name:            "short evidence is untouched",
-			evidence:        "./scripts/racing.sh",
-			wantContainsAll: "./scripts/racing.sh",
-		},
-		{
-			name:           "evidence at the limit is untouched",
-			evidence:       strings.Repeat("a", maxEvidenceRunes),
-			wantRuneLength: maxEvidenceRunes,
-		},
-		{
-			name:           "longer evidence is truncated with an ellipsis",
-			evidence:       strings.Repeat("b", maxEvidenceRunes+50),
-			wantTruncated:  true,
-			wantRuneLength: maxEvidenceRunes + 1,
-		},
-		{
-			name:           "truncation counts runes, not bytes",
-			evidence:       strings.Repeat("é", maxEvidenceRunes+10),
-			wantTruncated:  true,
-			wantRuneLength: maxEvidenceRunes + 1,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := renderResult(result.NewResult(result.Finding{
-				Source:   result.SourceRule,
-				Category: result.Category("shell"),
-				Severity: result.SeverityError,
-				Message:  "flagged",
-				Evidence: result.Evidence{Summary: tt.evidence},
-			}), renderStyle{})
-
-			_, rendered, ok := strings.Cut(got, "Evidence: ")
-			if !ok {
-				t.Fatalf("renderResult() = %q, want an evidence line", got)
-			}
-			rendered = strings.TrimSuffix(rendered, "\n")
-
-			if tt.wantContainsAll != "" && rendered != tt.wantContainsAll {
-				t.Fatalf("evidence = %q, want %q", rendered, tt.wantContainsAll)
-			}
-			if tt.wantRuneLength > 0 && len([]rune(rendered)) != tt.wantRuneLength {
-				t.Fatalf("evidence rune length = %d, want %d", len([]rune(rendered)), tt.wantRuneLength)
-			}
-			if got := strings.HasSuffix(rendered, "…"); got != tt.wantTruncated {
-				t.Fatalf("evidence truncated = %t, want %t", got, tt.wantTruncated)
-			}
-		})
-	}
-}
-
-func TestRenderResultColour(t *testing.T) {
-	scanResult := result.NewResult(
-		result.Finding{Source: result.SourceRule, Category: result.Category("shell"), Severity: result.SeverityError, Message: "shell execution"},
-		result.Finding{Source: result.SourceRule, Category: result.Category("url"), Severity: result.SeverityWarning, Message: "unrelated url"},
-		result.Finding{Source: result.SourceAnalyzer, Category: result.Category("hidden"), Severity: result.SeverityInfo, Message: "worth a look"},
-	)
-
-	tests := []struct {
-		name        string
-		style       renderStyle
-		wants       []string
-		wantMissing []string
-	}{
-		{
-			name:        "plain output carries no escape codes",
-			style:       renderStyle{},
-			wants:       []string{"[error] shell (rule): shell execution", "[warning] url", "[info] hidden"},
-			wantMissing: []string{"\x1b["},
-		},
-		{
-			name:  "colour wraps the severity label only",
-			style: renderStyle{color: true},
-			wants: []string{
-				"\x1b[31m[error]\x1b[0m shell (rule): shell execution",
-				"\x1b[33m[warning]\x1b[0m url (rule): unrelated url",
-				"\x1b[36m[info]\x1b[0m hidden (analyzer): worth a look",
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := renderResult(scanResult, tt.style)
-
-			for _, want := range tt.wants {
-				if !strings.Contains(got, want) {
-					t.Fatalf("renderResult() = %q, want substring %q", got, want)
-				}
-			}
-			for _, missing := range tt.wantMissing {
-				if strings.Contains(got, missing) {
-					t.Fatalf("renderResult() = %q, want no substring %q", got, missing)
-				}
-			}
-		})
-	}
-}
-
-func TestRenderScansTally(t *testing.T) {
-	clean := func(path string) fileScan {
-		return fileScan{path: path, result: result.NewCleanResult()}
-	}
-	flagged := func(path string, severities ...result.Severity) fileScan {
-		findings := make([]result.Finding, 0, len(severities))
-		for _, severity := range severities {
-			findings = append(findings, result.Finding{
-				Source:   result.SourceRule,
-				Category: result.Category("shell"),
-				Severity: severity,
-				Message:  "flagged",
-			})
-		}
-
-		return fileScan{path: path, result: result.NewResult(findings...)}
-	}
-
-	tests := []struct {
-		name        string
-		scans       []fileScan
-		total       int
-		wants       []string
-		wantMissing []string
-	}{
-		{
-			name:        "a single file prints no tally",
-			scans:       []fileScan{flagged("one.md", result.SeverityError)},
-			total:       1,
-			wantMissing: []string{"scanned ·", "files scanned"},
-		},
-		{
-			name: "a multi file run ends with one tally",
-			scans: []fileScan{
-				clean("one.md"),
-				flagged("two.md", result.SeverityError, result.SeverityWarning),
-				flagged("three.md", result.SeverityWarning, result.SeverityWarning, result.SeverityInfo),
-			},
-			total: 3,
-			wants: []string{"3 files scanned · 1 clean · 2 flagged · 5 findings (1 error, 3 warning, 1 info)"},
-		},
-		{
-			name:  "a clean multi file run counts no findings",
-			scans: []fileScan{clean("one.md"), clean("two.md")},
-			total: 2,
-			wants: []string{"2 files scanned · 2 clean · 0 flagged · 0 findings"},
-			// No severity breakdown when there is nothing to break down.
-			wantMissing: []string{"("},
-		},
-		{
-			name:  "the tally counts scanned files, not discovered ones",
-			scans: []fileScan{flagged("two.md", result.SeverityError)},
-			total: 2,
-			wants: []string{"1 file scanned · 0 clean · 1 flagged · 1 finding (1 error)"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := renderScans(tt.scans, tt.total, renderStyle{})
-
-			for _, want := range tt.wants {
-				if !strings.Contains(got, want) {
-					t.Fatalf("renderScans() = %q, want substring %q", got, want)
-				}
-			}
-			for _, missing := range tt.wantMissing {
-				if strings.Contains(got, missing) {
-					t.Fatalf("renderScans() = %q, want no substring %q", got, missing)
-				}
-			}
-		})
-	}
-}
-
-func TestRenderScansTallyFollowsACleanFinalFile(t *testing.T) {
-	scans := []fileScan{
-		{path: "one.md", result: result.NewResult(result.Finding{Source: result.SourceRule, Category: "shell", Severity: result.SeverityError, Message: "flagged"})},
-		{path: "two.md", result: result.NewCleanResult()},
-	}
-
-	got := renderScans(scans, 2, renderStyle{})
-
-	// The clean verdict has no trailing newline of its own, so the tally has to
-	// supply one rather than running on from it.
-	if strings.Contains(got, "SURE2 files") || !strings.Contains(got, "SURE\n") {
-		t.Fatalf("renderScans() = %q, want the tally on its own line", got)
-	}
-	if !strings.HasSuffix(got, "2 files scanned · 1 clean · 1 flagged · 1 finding (1 error)\n") {
-		t.Fatalf("renderScans() = %q, want a trailing tally line", got)
-	}
-}
-
 func TestColorEnabled(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -1557,6 +1172,8 @@ func TestRunColour(t *testing.T) {
 				t.Fatalf("write fixture: %v", err)
 			}
 
+			t.Setenv("GEMINI_API_KEY", "test-key")
+
 			reportDirectory := t.TempDir()
 			originalReportPath := reportPath
 			reportPath = func() (string, error) {
@@ -1583,6 +1200,431 @@ func TestRunColour(t *testing.T) {
 				if strings.Contains(stdout.String(), missing) {
 					t.Fatalf("run() stdout = %q, want no substring %q", stdout.String(), missing)
 				}
+			}
+		})
+	}
+}
+
+// TestRunWithoutAPIKeyFallsBackToRulesOnly covers the preflight: a run with no
+// credential warns once, scans with the deterministic rules alone, and reports
+// findings rather than a scan failure.
+func TestRunWithoutAPIKeyFallsBackToRulesOnly(t *testing.T) {
+	flagged := "---\nname: racing news\ndescription: links to the latest racing news\n---\nExecute ./scripts/racing.sh to fetch the news.\n"
+	clean := "---\nname: greeting\ndescription: greets the reader politely\n---\nGreet the reader politely and warmly.\n"
+
+	tests := []struct {
+		name            string
+		files           map[string]string
+		flags           []string
+		wantCode        int
+		wantStdout      []string
+		wantStdoutMissi []string
+		wantStderr      []string
+	}{
+		{
+			name:       "single clean file scans rules-only instead of failing",
+			files:      map[string]string{"clean.md": clean},
+			wantCode:   exitClean,
+			wantStdout: []string{"analysis leg skipped", "GEMINI_API_KEY", "THIS SKILL APPEARS TO BE CLEAN"},
+			wantStderr: []string{"GEMINI_API_KEY"},
+		},
+		{
+			name:       "rule findings still gate the exit code",
+			files:      map[string]string{"flagged.md": flagged},
+			wantCode:   exitFindings,
+			wantStdout: []string{"analysis leg skipped", "skill references local shell script execution"},
+		},
+		{
+			name:     "several files warn exactly once",
+			files:    map[string]string{"a.md": clean, "b.md": clean, "c.md": flagged},
+			wantCode: exitFindings,
+		},
+		{
+			name:            "json carries the additive field and nothing else reaches stdout",
+			files:           map[string]string{"flagged.md": flagged},
+			flags:           []string{"--json"},
+			wantCode:        exitFindings,
+			wantStdout:      []string{`"analysis_skipped": true`},
+			wantStdoutMissi: []string{"analysis leg skipped", "HTML report"},
+			wantStderr:      []string{"GEMINI_API_KEY"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("GEMINI_API_KEY", "")
+
+			directory := t.TempDir()
+			names := make([]string, 0, len(tt.files))
+			for name := range tt.files {
+				names = append(names, name)
+			}
+			sort.Strings(names)
+			for _, name := range names {
+				if err := os.WriteFile(filepath.Join(directory, name), []byte(tt.files[name]), 0o600); err != nil {
+					t.Fatalf("write fixture: %v", err)
+				}
+			}
+
+			reportDirectory := t.TempDir()
+			originalReportPath := reportPath
+			reportPath = func() (string, error) {
+				return filepath.Join(reportDirectory, "skill-wiz-report.html"), nil
+			}
+			originalAnalyzer := newSkillAnalyzer
+			newSkillAnalyzer = func(analyse.Config) scanner.Analyzer {
+				t.Fatal("newSkillAnalyzer() called with no GEMINI_API_KEY set")
+				return nil
+			}
+			defer func() {
+				reportPath = originalReportPath
+				newSkillAnalyzer = originalAnalyzer
+			}()
+
+			var stdout, stderr bytes.Buffer
+			gotCode := run(append(append([]string{}, tt.flags...), directory), &stdout, &stderr, false)
+
+			if gotCode != tt.wantCode {
+				t.Fatalf("run() code = %d, want %d (stderr = %q)", gotCode, tt.wantCode, stderr.String())
+			}
+			if got := strings.Count(stderr.String(), "GEMINI_API_KEY"); got != 1 {
+				t.Fatalf("stderr mentions GEMINI_API_KEY %d times, want 1: %q", got, stderr.String())
+			}
+			for _, want := range tt.wantStdout {
+				if !strings.Contains(stdout.String(), want) {
+					t.Fatalf("run() stdout = %q, want substring %q", stdout.String(), want)
+				}
+			}
+			for _, missing := range tt.wantStdoutMissi {
+				if strings.Contains(stdout.String(), missing) {
+					t.Fatalf("run() stdout = %q, want no substring %q", stdout.String(), missing)
+				}
+			}
+			for _, want := range tt.wantStderr {
+				if !strings.Contains(stderr.String(), want) {
+					t.Fatalf("run() stderr = %q, want substring %q", stderr.String(), want)
+				}
+			}
+		})
+	}
+}
+
+// TestRunWithAPIKeyIsUnchanged guards the other half of the preflight: with a
+// key present the run behaves exactly as it did before, with no extra output
+// and no additive JSON field.
+func TestRunWithAPIKeyIsUnchanged(t *testing.T) {
+	tests := []struct {
+		name        string
+		flags       []string
+		wantMissing []string
+	}{
+		{
+			name:        "text output carries no skipped note",
+			wantMissing: []string{"analysis leg skipped", "GEMINI_API_KEY"},
+		},
+		{
+			name:        "json output carries no skipped field",
+			flags:       []string{"--json"},
+			wantMissing: []string{"analysis_skipped"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("GEMINI_API_KEY", "test-key")
+
+			path := filepath.Join(t.TempDir(), "skill.md")
+			content := "---\nname: greeting\ndescription: greets the reader politely\n---\nGreet the reader politely and warmly.\n"
+			if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+				t.Fatalf("write fixture: %v", err)
+			}
+
+			reportDirectory := t.TempDir()
+			originalReportPath := reportPath
+			reportPath = func() (string, error) {
+				return filepath.Join(reportDirectory, "skill-wiz-report.html"), nil
+			}
+			called := false
+			originalAnalyzer := newSkillAnalyzer
+			newSkillAnalyzer = func(analyse.Config) scanner.Analyzer {
+				called = true
+				return cleanAnalyzer()
+			}
+			defer func() {
+				reportPath = originalReportPath
+				newSkillAnalyzer = originalAnalyzer
+			}()
+
+			var stdout, stderr bytes.Buffer
+			run(append(append([]string{}, tt.flags...), path), &stdout, &stderr, false)
+
+			if !called {
+				t.Fatal("newSkillAnalyzer() was not called, want the analysis leg to run")
+			}
+			combined := stdout.String() + stderr.String()
+			for _, missing := range tt.wantMissing {
+				if strings.Contains(combined, missing) {
+					t.Fatalf("run() output = %q, want no substring %q", combined, missing)
+				}
+			}
+		})
+	}
+}
+
+// scanRecorder observes a run through the analyzer seam. It delays each skill by
+// a per-name duration so completion order can differ from file order, and
+// records enough to tell a concurrent run from a sequential one: which skills
+// were entered, which finished and in what order, and how many were ever in
+// flight at once.
+type scanRecorder struct {
+	delays map[string]time.Duration
+
+	mu          sync.Mutex
+	entered     []string
+	completed   []string
+	inFlight    int
+	maxInFlight int
+}
+
+func (r *scanRecorder) analyzer() scanner.Analyzer {
+	return scanner.AnalyzerFunc(func(s *skill.Skill) (result.Result, error) {
+		r.mu.Lock()
+		r.entered = append(r.entered, s.Name)
+		r.inFlight++
+		if r.inFlight > r.maxInFlight {
+			r.maxInFlight = r.inFlight
+		}
+		r.mu.Unlock()
+
+		time.Sleep(r.delays[s.Name])
+
+		r.mu.Lock()
+		r.inFlight--
+		r.completed = append(r.completed, s.Name)
+		r.mu.Unlock()
+
+		return result.NewCleanResult(), nil
+	})
+}
+
+func (r *scanRecorder) snapshot() (entered []string, completed []string, maxInFlight int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return append([]string{}, r.entered...), append([]string{}, r.completed...), r.maxInFlight
+}
+
+func equalOrder(got []string, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+
+	return true
+}
+
+func TestRunScansConcurrentlyAndRendersInFileOrder(t *testing.T) {
+	// The first file is the slowest, so a pool that rendered by completion
+	// order rather than by file index would put it last.
+	delays := map[string]time.Duration{
+		"alpha": 60 * time.Millisecond,
+		"bravo": 30 * time.Millisecond,
+		"delta": 0,
+	}
+
+	// File order is alpha, bravo, delta; the delays make completion order the
+	// exact reverse, so rendering by completion rather than by index is visible.
+	fileOrder := []string{"alpha", "bravo", "delta"}
+	completionOrder := []string{"delta", "bravo", "alpha"}
+
+	tests := []struct {
+		name           string
+		flags          []string
+		wantConcurrent bool
+	}{
+		{
+			name:           "default concurrency",
+			flags:          nil,
+			wantConcurrent: true,
+		},
+		{
+			name:           "concurrency 1 scans sequentially",
+			flags:          []string{"--concurrency", "1"},
+			wantConcurrent: false,
+		},
+		{
+			name:           "concurrency above the file count",
+			flags:          []string{"--concurrency", "16"},
+			wantConcurrent: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("GEMINI_API_KEY", "test-key")
+
+			directory := t.TempDir()
+			names := []string{"alpha", "bravo", "delta"}
+			paths := make([]string, 0, len(names))
+			for _, name := range names {
+				path := filepath.Join(directory, name+".md")
+				content := fmt.Sprintf("---\nname: %s\ndescription: describes the %s skill clearly\n---\nExplain the %s topic to the reader.\n", name, name, name)
+				if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+					t.Fatalf("write fixture: %v", err)
+				}
+				paths = append(paths, path)
+			}
+
+			reportDirectory := t.TempDir()
+			originalReportPath := reportPath
+			reportPath = func() (string, error) {
+				return filepath.Join(reportDirectory, "skill-wiz-report.html"), nil
+			}
+			recorder := &scanRecorder{delays: delays}
+			originalAnalyzer := newSkillAnalyzer
+			newSkillAnalyzer = func(analyse.Config) scanner.Analyzer {
+				return recorder.analyzer()
+			}
+			defer func() {
+				reportPath = originalReportPath
+				newSkillAnalyzer = originalAnalyzer
+			}()
+
+			var stdout, stderr bytes.Buffer
+			gotCode := run(append(append([]string{}, tt.flags...), paths...), &stdout, &stderr, false)
+
+			if gotCode != exitClean {
+				t.Fatalf("run() code = %d, want %d (stderr = %q)", gotCode, exitClean, stderr.String())
+			}
+
+			previous := -1
+			for _, path := range paths {
+				index := strings.Index(stdout.String(), "=== "+path+" ===")
+				if index < 0 {
+					t.Fatalf("run() stdout = %q, want header for %q", stdout.String(), path)
+				}
+				if index < previous {
+					t.Fatalf("run() rendered %q out of file order:\n%s", path, stdout.String())
+				}
+				previous = index
+			}
+
+			entered, completed, maxInFlight := recorder.snapshot()
+
+			if tt.wantConcurrent {
+				// Without these two the test would still pass if scanFiles
+				// regressed to a sequential loop: the delays alone prove nothing.
+				if maxInFlight < 2 {
+					t.Fatalf("peak scans in flight = %d, want at least 2 — the run was sequential", maxInFlight)
+				}
+				if !equalOrder(completed, completionOrder) {
+					t.Fatalf("completion order = %v, want %v", completed, completionOrder)
+				}
+				if equalOrder(completed, fileOrder) {
+					t.Fatalf("completion order = %v, which matches file order — the test proves nothing about ordering", completed)
+				}
+				return
+			}
+
+			if maxInFlight != 1 {
+				t.Fatalf("peak scans in flight = %d, want 1 under --concurrency 1", maxInFlight)
+			}
+			if !equalOrder(entered, fileOrder) {
+				t.Fatalf("scan order = %v, want %v", entered, fileOrder)
+			}
+			if !equalOrder(completed, fileOrder) {
+				t.Fatalf("completion order = %v, want %v", completed, fileOrder)
+			}
+		})
+	}
+}
+
+func TestRunReportsConcurrentFailuresInFileOrder(t *testing.T) {
+	t.Setenv("GEMINI_API_KEY", "test-key")
+
+	directory := t.TempDir()
+	// The two failures sit either side of a slow success, so a pool writing
+	// stderr from its workers would be free to interleave them.
+	files := []struct {
+		name    string
+		content string
+	}{
+		{name: "a-broken.md", content: "no frontmatter here"},
+		{name: "b-good.md", content: "---\nname: bravo\ndescription: describes the bravo skill clearly\n---\nExplain the bravo topic.\n"},
+		{name: "c-broken.md", content: "also no frontmatter"},
+	}
+
+	paths := make([]string, 0, len(files))
+	for _, file := range files {
+		path := filepath.Join(directory, file.name)
+		if err := os.WriteFile(path, []byte(file.content), 0o600); err != nil {
+			t.Fatalf("write fixture: %v", err)
+		}
+		paths = append(paths, path)
+	}
+
+	reportDirectory := t.TempDir()
+	originalReportPath := reportPath
+	reportPath = func() (string, error) {
+		return filepath.Join(reportDirectory, "skill-wiz-report.html"), nil
+	}
+	// The one file that parses is also the slow one, so both failures are known
+	// long before it finishes: nothing but the file-ordered drain keeps them in
+	// order on stderr.
+	recorder := &scanRecorder{delays: map[string]time.Duration{"bravo": 40 * time.Millisecond}}
+	originalAnalyzer := newSkillAnalyzer
+	newSkillAnalyzer = func(analyse.Config) scanner.Analyzer {
+		return recorder.analyzer()
+	}
+	defer func() {
+		reportPath = originalReportPath
+		newSkillAnalyzer = originalAnalyzer
+	}()
+
+	var stdout, stderr bytes.Buffer
+	if gotCode := run(paths, &stdout, &stderr, false); gotCode != exitFailure {
+		t.Fatalf("run() code = %d, want %d", gotCode, exitFailure)
+	}
+
+	first := strings.Index(stderr.String(), paths[0])
+	second := strings.Index(stderr.String(), paths[2])
+	if first < 0 || second < 0 {
+		t.Fatalf("run() stderr = %q, want both failures reported", stderr.String())
+	}
+	if first > second {
+		t.Fatalf("run() reported failures out of file order:\n%s", stderr.String())
+	}
+}
+
+func TestRunRejectsInvalidConcurrency(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+	}{
+		{name: "zero", value: "0"},
+		{name: "negative", value: "-2"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "skill.md")
+			content := "---\nname: greeting\ndescription: greets the reader politely\n---\nGreet the reader politely.\n"
+			if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+				t.Fatalf("write fixture: %v", err)
+			}
+
+			var stdout, stderr bytes.Buffer
+			gotCode := run([]string{"--concurrency", tt.value, path}, &stdout, &stderr, false)
+
+			if gotCode != exitFailure {
+				t.Fatalf("run() code = %d, want %d", gotCode, exitFailure)
+			}
+			if got := strings.Count(stderr.String(), "invalid -concurrency"); got != 1 {
+				t.Fatalf("stderr reported the error %d times, want 1: %q", got, stderr.String())
 			}
 		})
 	}

@@ -190,3 +190,125 @@ func TestMerge(t *testing.T) {
 		})
 	}
 }
+
+func TestGateRankAndDisplayRankDisagreeOnUnknownSeverities(t *testing.T) {
+	tests := []struct {
+		name            string
+		severity        Severity
+		wantGateRank    int
+		wantDisplayRank int
+	}{
+		{name: "error", severity: SeverityError, wantGateRank: 2, wantDisplayRank: 0},
+		{name: "warning", severity: SeverityWarning, wantGateRank: 1, wantDisplayRank: 1},
+		{name: "info", severity: SeverityInfo, wantGateRank: 0, wantDisplayRank: 2},
+		{
+			// Gating must put an unknown severity below every known one so a
+			// malformed finding cannot fail a build on its own — level with info
+			// is not low enough, because the comparison is >= and info is a
+			// selectable threshold. Display must sort it last so it never
+			// outranks a real finding.
+			name:            "unknown severity gates below info and displays last",
+			severity:        Severity("critical"),
+			wantGateRank:    UnknownGateRank,
+			wantDisplayRank: 3,
+		},
+		{name: "empty severity gates below info and displays last", severity: Severity(""), wantGateRank: UnknownGateRank, wantDisplayRank: 3},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := GateRank(tt.severity); got != tt.wantGateRank {
+				t.Fatalf("GateRank(%q) = %d, want %d", tt.severity, got, tt.wantGateRank)
+			}
+			if got := DisplayRank(tt.severity); got != tt.wantDisplayRank {
+				t.Fatalf("DisplayRank(%q) = %d, want %d", tt.severity, got, tt.wantDisplayRank)
+			}
+		})
+	}
+}
+
+// TestUnknownGateRankIsBelowEverySeverity states the guarantee directly rather
+// than leaving it implied by the table: no threshold a user can select is low
+// enough for an unrecognised severity to fail a build.
+func TestUnknownGateRankIsBelowEverySeverity(t *testing.T) {
+	for _, severity := range Severities() {
+		if UnknownGateRank >= GateRank(severity) {
+			t.Fatalf("UnknownGateRank = %d, want strictly below GateRank(%q) = %d", UnknownGateRank, severity, GateRank(severity))
+		}
+	}
+}
+
+func TestKnownAndSeverities(t *testing.T) {
+	want := []Severity{SeverityError, SeverityWarning, SeverityInfo}
+
+	got := Severities()
+	if len(got) != len(want) {
+		t.Fatalf("Severities() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("Severities() = %v, want %v", got, want)
+		}
+		if !Known(want[i]) {
+			t.Fatalf("Known(%q) = false, want true", want[i])
+		}
+	}
+
+	// The returned slice is a copy: reordering it must not move the source.
+	got[0] = SeverityInfo
+	if Severities()[0] != SeverityError {
+		t.Fatal("Severities() returned a slice aliasing the package ordering")
+	}
+
+	if Known(Severity("critical")) {
+		t.Fatal(`Known("critical") = true, want false`)
+	}
+}
+
+func TestFormatSources(t *testing.T) {
+	tests := []struct {
+		name    string
+		sources []Source
+		want    string
+	}{
+		{name: "none", sources: nil, want: ""},
+		{name: "one", sources: []Source{SourceRule}, want: "rule"},
+		{name: "two", sources: []Source{SourceRule, SourceAnalyzer}, want: "rule and analyzer"},
+		{
+			name:    "three",
+			sources: []Source{SourceValidation, SourceRule, SourceAnalyzer},
+			want:    "validation, rule, and analyzer",
+		},
+		{name: "empty sources are dropped", sources: []Source{SourceRule, Source("")}, want: "rule"},
+		{name: "only empty sources", sources: []Source{Source("")}, want: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := FormatSources(tt.sources); got != tt.want {
+				t.Fatalf("FormatSources(%v) = %q, want %q", tt.sources, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPluralize(t *testing.T) {
+	tests := []struct {
+		name  string
+		count int
+		noun  string
+		want  string
+	}{
+		{name: "zero", count: 0, noun: "file", want: "0 files"},
+		{name: "one", count: 1, noun: "file", want: "1 file"},
+		{name: "many", count: 3, noun: "finding", want: "3 findings"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := Pluralize(tt.count, tt.noun); got != tt.want {
+				t.Fatalf("Pluralize(%d, %q) = %q, want %q", tt.count, tt.noun, got, tt.want)
+			}
+		})
+	}
+}

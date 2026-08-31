@@ -70,7 +70,8 @@ so obvious detections never depend on it being available or agreeable.
 Two properties fall out of that shape, and both are deliberate:
 
 - **The scan degrades, it does not fail.** If the model errors but the rules already found something,
-  you get the rule findings. A missing `GEMINI_API_KEY` is only fatal for an otherwise-clean skill.
+  you get the rule findings. And a missing `GEMINI_API_KEY` is not a failure at all: the run warns
+  once, skips the analysis leg, and reports what the rules found.
 - **A broken model response never reads as clean.** Empty output, non-JSON, or a malformed finding
   becomes a `warning` about the analyzer — not a pass.
 
@@ -102,7 +103,10 @@ Requires **Go 1.24+**. For the model leg, export a Gemini API key:
 export GEMINI_API_KEY="your-api-key"
 ```
 
-Without it the rules still run — you just lose the enrichment layer.
+Without it the rules still run — you just lose the enrichment layer. A run with no key warns once on
+stderr, notes on the console that the analysis leg was skipped, marks it on the HTML report, and adds
+`"analysis_skipped": true` to each `--json` entry. The field is additive: a complete scan omits it
+entirely, so it is how an automated consumer tells a rules-only result from a full one.
 
 ## Usage
 
@@ -127,9 +131,19 @@ skill-wiz ~/.claude/skills ./team-skills              # directories and files to
 | `--model` | `gemini-2.5-flash` | Gemini model used for the analysis leg |
 | `--timeout` | `1m` | Maximum time to wait for the analysis leg |
 | `--fail-on` | `error` | Lowest finding severity that fails the run: `error`, `warning`, or `info` |
+| `--concurrency` | `8` | How many files to scan at once |
 
 One unreadable or unparseable file never hides the rest: it is reported on stderr and the run
 carries on. However many files a run covers, it writes one HTML report.
+
+Files are scanned through a bounded worker pool, so a directory costs roughly one analyzer round trip
+per batch rather than one per file. The default of `8` follows what the API tolerates rather than the
+machine's core count — the work is network-bound. `--concurrency 1` scans sequentially.
+
+Concurrency changes nothing you can see: results, the report, the JSON array, the tally, and the
+stderr failure messages all stay in file order however the workers finished, so the output of a
+concurrent run is byte-identical to a sequential one. **`--timeout` remains per request** — it bounds
+each analysis call, not the run as a whole.
 
 ### Exit codes
 
@@ -277,13 +291,14 @@ The rule heuristics are keyword-based and tuned against those three — retune o
 ### Layout
 
 ```text
-main.go     flag parsing, wiring, rendering
+main.go     flag parsing, wiring, orchestration, JSON
 discover/   expands CLI paths into the skill files to scan
 skill/      frontmatter parsing and validation
 rules/      deterministic checks
 analyse/    Gemini client and prompt hardening
 scanner/    orchestration; owns the Analyzer seam
-result/     Finding and Result — the common currency
+result/     Finding and Result — the common currency, and the severity vocabulary
+render/     console output
 report/     self-contained HTML rendering
 docs/       proposal.md roadmap and the story backlog
 ```

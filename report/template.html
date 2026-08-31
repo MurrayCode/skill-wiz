@@ -343,6 +343,7 @@ h1 {
         <span><b>file</b> <span class="value">{{.SourcePath}}</span></span>
         <span><b>scanned</b> <span class="value">{{.GeneratedAt}}</span></span>
         {{if .Sources}}<span><b>checks</b> <span class="value">{{.Sources}}</span></span>{{end}}
+        {{if .AnalysisSkipped}}<span><b>analysis</b> <span class="value">skipped — GEMINI_API_KEY not set, deterministic rules only</span></span>{{end}}
       </div>
     </div>
 

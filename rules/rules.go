@@ -78,7 +78,7 @@ func descriptionMismatchRule(s *skill.Skill) []result.Finding {
 	segments := bodySegments(s.Body)
 	hasMatchingSection := false
 	for _, segment := range segments {
-		segmentKeywords := keywords(segment)
+		segmentKeywords := keywordTokens(segment)
 		if len(segmentKeywords) < 4 {
 			continue
 		}
@@ -109,7 +109,12 @@ func descriptionMismatchRule(s *skill.Skill) []result.Finding {
 }
 
 func keywords(text string) map[string]struct{} {
-	text = urlPattern.ReplaceAllString(text, " ")
+	return keywordTokens(urlPattern.ReplaceAllString(text, " "))
+}
+
+// keywordTokens is the tokenising half of keywords, for callers whose text has
+// already had its URLs stripped.
+func keywordTokens(text string) map[string]struct{} {
 	tokens := strings.FieldsFunc(strings.ToLower(text), func(r rune) bool {
 		return !unicode.IsLetter(r) && !unicode.IsNumber(r)
 	})
@@ -178,7 +183,7 @@ func unrelatedURLRule(s *skill.Skill) []result.Finding {
 		return nil
 	}
 
-	intentTokens := intentTokens(s, urls)
+	intentTokens := intentTokens(s)
 	if len(intentTokens) == 0 {
 		return nil
 	}
@@ -225,13 +230,18 @@ func extractURLs(text string) []string {
 	return urls
 }
 
-func intentTokens(s *skill.Skill, urls []string) map[string]struct{} {
-	text := strings.Join([]string{s.Name, s.Description, s.Body}, " ")
-	for _, rawURL := range urls {
-		text = strings.ReplaceAll(text, rawURL, " ")
-	}
+// intentTokens is the vocabulary the skill declares about itself, with the body's
+// URLs removed so that a link cannot vouch for itself.
+//
+// The strip is one regexp pass over the body rather than one ReplaceAll pass per
+// extracted URL, which is what makes the rule linear. It is applied to the body
+// *before* joining, because that is the only text extractURLs ever drew from:
+// stripping the joined string would also remove URLs the name or description
+// declare, and those are part of the stated intent.
+func intentTokens(s *skill.Skill) map[string]struct{} {
+	body := urlPattern.ReplaceAllString(s.Body, " ")
 
-	return tokenSet(text)
+	return tokenSet(strings.Join([]string{s.Name, s.Description, body}, " "))
 }
 
 func urlTokens(parsed *url.URL) map[string]struct{} {
@@ -270,6 +280,10 @@ func shellExecutionRule(s *skill.Skill) []result.Finding {
 	}
 
 	for _, line := range strings.Split(body, "\n") {
+		if !mentionsShellToken(line) {
+			continue
+		}
+
 		trimmed := strings.TrimSpace(line)
 		if benignShellMention(trimmed) {
 			continue
@@ -287,6 +301,44 @@ func shellExecutionRule(s *skill.Skill) []result.Finding {
 	}
 
 	return nil
+}
+
+// mentionsShellToken is a necessary condition for shellCommandPattern to match:
+// every alternative it accepts contains "sh". The check is allocation-free so
+// that lines with no shell reference never reach the regexp engine, and never
+// reach benignShellMention's lowercased copy either.
+//
+// It must fold exactly as the pattern does or it would silently drop real
+// matches. The pattern is (?i), which is Unicode simple folding, not ASCII
+// folding: "s" folds to {s, S, ſ} — U+017F LATIN SMALL LETTER LONG S — so
+// "baſh script.txt" matches the pattern. "h" folds to {h, H} only. TestFoldSets
+// pins both sets against unicode.SimpleFold.
+func mentionsShellToken(line string) bool {
+	for i := 0; i < len(line); i++ {
+		width := foldedSWidth(line, i)
+		if width == 0 {
+			continue
+		}
+		if next := i + width; next < len(line) && (line[next] == 'h' || line[next] == 'H') {
+			return true
+		}
+	}
+
+	return false
+}
+
+// foldedSWidth returns the byte width of the "s" at index i under the pattern's
+// case folding, or 0 when there is none. ſ is the only non-ASCII member of the
+// set, and encodes as the two bytes 0xC5 0xBF.
+func foldedSWidth(line string, i int) int {
+	switch {
+	case line[i] == 's' || line[i] == 'S':
+		return 1
+	case line[i] == 0xC5 && i+1 < len(line) && line[i+1] == 0xBF:
+		return 2
+	default:
+		return 0
+	}
 }
 
 func benignShellMention(line string) bool {
@@ -372,14 +424,27 @@ func splitAlphaNumeric(token string) []string {
 		return nil
 	}
 
+	// Range over runes rather than bytes: indexing a string yields single bytes,
+	// so classifying a UTF-8 continuation byte as a rune would split multi-byte
+	// characters apart and put invalid UTF-8 into the token set.
 	parts := make([]string, 0, len(token))
 	start := 0
-	for i := 1; i < len(token); i++ {
-		if unicode.IsLetter(rune(token[i-1])) == unicode.IsLetter(rune(token[i])) {
+	first := true
+	previousIsLetter := false
+	for i, r := range token {
+		isLetter := unicode.IsLetter(r)
+		if first {
+			first = false
+			previousIsLetter = isLetter
 			continue
 		}
+		if isLetter == previousIsLetter {
+			continue
+		}
+
 		parts = append(parts, token[start:i])
 		start = i
+		previousIsLetter = isLetter
 	}
 	parts = append(parts, token[start:])
 	return parts

@@ -9,12 +9,13 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/murraycode/skill-wiz/analyse"
 	"github.com/murraycode/skill-wiz/discover"
+	"github.com/murraycode/skill-wiz/render"
 	"github.com/murraycode/skill-wiz/report"
 	"github.com/murraycode/skill-wiz/result"
 	"github.com/murraycode/skill-wiz/rules"
@@ -33,40 +34,10 @@ const (
 	exitFindings = 2
 )
 
-// maxEvidenceRunes bounds an evidence summary in the console. The HTML report
-// keeps the full text, so truncating here loses nothing.
-const maxEvidenceRunes = 200
-
-// ANSI colours for severity labels. Only the label is coloured, so the rest of
-// a finding line stays greppable.
-const (
-	colorReset   = "\x1b[0m"
-	colorError   = "\x1b[31m"
-	colorWarning = "\x1b[33m"
-	colorInfo    = "\x1b[36m"
-)
-
-var severityColor = map[result.Severity]string{
-	result.SeverityError:   colorError,
-	result.SeverityWarning: colorWarning,
-	result.SeverityInfo:    colorInfo,
-}
-
-// severityRank orders severities so that a threshold can be compared against a
-// finding. An unrecognised severity ranks lowest, so it gates only the most
-// permissive threshold rather than silently failing a build.
-var severityRank = map[result.Severity]int{
-	result.SeverityInfo:    0,
-	result.SeverityWarning: 1,
-	result.SeverityError:   2,
-}
-
-// renderStyle carries the presentation decisions taken in main. run writes to
-// an io.Writer, so whether stdout is a terminal has to arrive as a value rather
-// than be sniffed from inside the render path.
-type renderStyle struct {
-	color bool
-}
+// defaultConcurrency bounds how many files are scanned at once. The work is
+// network-bound rather than CPU-bound, so the right default follows what the
+// API tolerates, not how many cores the machine has.
+const defaultConcurrency = 8
 
 // colorEnabled decides whether severity labels are coloured. Colour is opt-out
 // twice over: --no-color and the NO_COLOR convention both silence it, and a
@@ -101,12 +72,13 @@ var reportPath = defaultReportPath
 
 // options is the parsed command line for a single run.
 type options struct {
-	paths   []string
-	json    bool
-	noColor bool
-	model   string
-	timeout time.Duration
-	failOn  result.Severity
+	paths       []string
+	json        bool
+	noColor     bool
+	model       string
+	timeout     time.Duration
+	failOn      result.Severity
+	concurrency int
 }
 
 func (o options) analyzerConfig() analyse.Config {
@@ -135,31 +107,46 @@ func run(args []string, stdout io.Writer, stderr io.Writer, terminal bool) int {
 		return exitFailure
 	}
 
-	analyzer := newSkillAnalyzer(opts.analyzerConfig())
+	// Preflight the credential once for the whole run. Without it the analysis
+	// leg cannot run, but the deterministic rules can and must: the project's
+	// design goal is that obvious detections never depend on the model. So warn
+	// once, pass a nil analyzer, and carry on rules-only rather than failing a
+	// file at a time.
+	var analyzer scanner.Analyzer
+	analysisSkipped := !analyse.HasAPIKey()
+	if analysisSkipped {
+		fmt.Fprintln(stderr, render.AnalysisSkippedWarning)
+	} else {
+		analyzer = newSkillAnalyzer(opts.analyzerConfig())
+	}
 
+	outcomes := scanFiles(files, analyzer, opts.concurrency)
+
+	// Both the results and the failures are consumed in file order, not in the
+	// order the workers finished, so console output, the report, the JSON array,
+	// the tally, and the stderr failures all stay deterministic.
 	scans := make([]fileScan, 0, len(files))
 	failed := false
-	for _, file := range files {
-		scan, err := scanFile(file, analyzer)
-		if err != nil {
+	for index, outcome := range outcomes {
+		if outcome.err != nil {
 			// One unreadable or unparseable file must not hide the rest: report
 			// it, remember the failure for the exit code, and carry on.
-			fmt.Fprintln(stderr, scanError(file, err, len(files)))
+			fmt.Fprintln(stderr, scanError(files[index], outcome.err, len(files)))
 			failed = true
 			continue
 		}
 
-		scans = append(scans, scan)
+		scans = append(scans, outcome.scan)
 	}
 	if len(scans) == 0 {
 		return exitFailure
 	}
 
 	// One run, one report: every scanned skill lands on the same page.
-	destination := writeReport(scans, stderr)
+	destination := writeReport(scans, analysisSkipped, stderr)
 
 	if opts.json {
-		rendered, err := renderJSON(jsonInputs(scans, destination))
+		rendered, err := renderJSON(jsonInputs(scans, destination, analysisSkipped))
 		if err != nil {
 			fmt.Fprintf(stderr, "failed to render JSON output: %v\n", err)
 			return exitFailure
@@ -169,7 +156,10 @@ func run(args []string, stdout io.Writer, stderr io.Writer, terminal bool) int {
 		return exitCode(scans, failed, opts.failOn)
 	}
 
-	fmt.Fprint(stdout, renderScans(scans, len(files), renderStyle{color: colorEnabled(terminal, opts.noColor)}))
+	if analysisSkipped {
+		fmt.Fprint(stdout, render.AnalysisSkippedNote())
+	}
+	fmt.Fprint(stdout, render.Scans(renderInputs(scans), len(files), render.Style{Color: colorEnabled(terminal, opts.noColor)}))
 	if destination != "" {
 		fmt.Fprint(stdout, renderReportPointer(destination))
 	}
@@ -186,13 +176,65 @@ func exitCode(scans []fileScan, failed bool, threshold result.Severity) int {
 
 	for _, scan := range scans {
 		for _, finding := range scan.result.Findings {
-			if severityRank[finding.Severity] >= severityRank[threshold] {
+			if result.GateRank(finding.Severity) >= result.GateRank(threshold) {
 				return exitFindings
 			}
 		}
 	}
 
 	return exitClean
+}
+
+// scanOutcome is one file's result or the error that stopped it, held together
+// so a worker can report either without touching shared state.
+type scanOutcome struct {
+	scan fileScan
+	err  error
+}
+
+// scanFiles scans every file through a bounded worker pool. The pool is bounded
+// rather than one goroutine per file because a directory scan can cover
+// hundreds of skills and each one is an API request: unbounded goroutines would
+// mean hundreds of simultaneous requests and near-certain rate limiting.
+//
+// Each worker writes to its own index of a pre-sized slice and never appends, so
+// results come back in file order however completion order fell out. There is no
+// shared cancellation: one bad file must never hide the rest, and a fail-fast
+// pool would break exactly that.
+func scanFiles(files []string, analyzer scanner.Analyzer, concurrency int) []scanOutcome {
+	outcomes := make([]scanOutcome, len(files))
+	if len(files) == 0 {
+		return outcomes
+	}
+
+	workers := concurrency
+	if workers < 1 {
+		workers = 1
+	}
+	if workers > len(files) {
+		workers = len(files)
+	}
+
+	indexes := make(chan int)
+	var waitGroup sync.WaitGroup
+	for worker := 0; worker < workers; worker++ {
+		waitGroup.Add(1)
+		go func() {
+			defer waitGroup.Done()
+			for index := range indexes {
+				scan, err := scanFile(files[index], analyzer)
+				outcomes[index] = scanOutcome{scan: scan, err: err}
+			}
+		}()
+	}
+
+	for index := range files {
+		indexes <- index
+	}
+	close(indexes)
+	waitGroup.Wait()
+
+	return outcomes
 }
 
 // fileScan is the outcome of scanning one skill file.
@@ -249,6 +291,7 @@ func parseOptions(args []string, stderr io.Writer) (options, error) {
 	model := flags.String("model", analyse.DefaultModel, "Gemini model used for the analysis leg")
 	timeout := flags.Duration("timeout", analyse.DefaultTimeout, "maximum time to wait for the analysis leg")
 	failOn := flags.String("fail-on", string(result.SeverityError), "lowest finding severity that fails the run: error, warning, or info")
+	concurrency := flags.Int("concurrency", defaultConcurrency, "how many files to scan at once; --timeout still bounds each analysis request individually")
 
 	if err := flags.Parse(args); err != nil {
 		printUsage(flags, stderr)
@@ -260,6 +303,9 @@ func parseOptions(args []string, stderr io.Writer) (options, error) {
 	}
 	if *timeout <= 0 {
 		return options{}, errors.New("invalid -timeout: must be greater than zero")
+	}
+	if *concurrency <= 0 {
+		return options{}, errors.New("invalid -concurrency: must be greater than zero")
 	}
 	threshold, err := parseSeverity(*failOn)
 	if err != nil {
@@ -273,12 +319,13 @@ func parseOptions(args []string, stderr io.Writer) (options, error) {
 	}
 
 	return options{
-		paths:   positional,
-		json:    *emitJSON,
-		noColor: *noColor,
-		model:   strings.TrimSpace(*model),
-		timeout: *timeout,
-		failOn:  threshold,
+		paths:       positional,
+		json:        *emitJSON,
+		noColor:     *noColor,
+		model:       strings.TrimSpace(*model),
+		timeout:     *timeout,
+		failOn:      threshold,
+		concurrency: *concurrency,
 	}, nil
 }
 
@@ -286,7 +333,7 @@ func parseOptions(args []string, stderr io.Writer) (options, error) {
 // code, rejecting anything outside the known severities.
 func parseSeverity(value string) (result.Severity, error) {
 	severity := result.Severity(strings.ToLower(strings.TrimSpace(value)))
-	if _, ok := severityRank[severity]; !ok {
+	if !result.Known(severity) {
 		return "", fmt.Errorf("invalid -fail-on %q: must be one of error, warning, info", strings.TrimSpace(value))
 	}
 
@@ -304,7 +351,7 @@ func printUsage(flags *flag.FlagSet, w io.Writer) {
 // writeReport saves the run's HTML report and returns where it landed, or ""
 // when it could not be written. A report that cannot be written is a warning,
 // not a scan failure: the console output already carries every finding.
-func writeReport(scans []fileScan, stderr io.Writer) string {
+func writeReport(scans []fileScan, analysisSkipped bool, stderr io.Writer) string {
 	destination, err := reportPath()
 	if err != nil {
 		fmt.Fprintf(stderr, "failed to resolve HTML report path: %v\n", err)
@@ -319,6 +366,7 @@ func writeReport(scans []fileScan, stderr io.Writer) string {
 			SourcePath:       scan.path,
 			GeneratedAt:      time.Now(),
 			Result:           scan.result,
+			AnalysisSkipped:  analysisSkipped,
 		})
 	}
 
@@ -328,6 +376,17 @@ func writeReport(scans []fileScan, stderr io.Writer) string {
 	}
 
 	return destination
+}
+
+// renderInputs maps completed scans onto what the console renderer needs. The
+// renderer never reads the parsed skill, so it never receives one.
+func renderInputs(scans []fileScan) []render.Input {
+	inputs := make([]render.Input, 0, len(scans))
+	for _, scan := range scans {
+		inputs = append(inputs, render.Input{Path: scan.path, Result: scan.result})
+	}
+
+	return inputs
 }
 
 func renderReportPointer(destination string) string {
@@ -354,10 +413,11 @@ func defaultReportPath() (string, error) {
 
 // jsonInput is everything renderJSON needs about a completed scan.
 type jsonInput struct {
-	Path       string
-	Skill      *skill.Skill
-	Result     result.Result
-	ReportPath string
+	Path            string
+	Skill           *skill.Skill
+	Result          result.Result
+	ReportPath      string
+	AnalysisSkipped bool
 }
 
 // jsonReport is the stable shape of --json output. Keep field names additive:
@@ -368,6 +428,10 @@ type jsonReport struct {
 	Clean      bool          `json:"clean"`
 	Findings   []jsonFinding `json:"findings"`
 	ReportPath string        `json:"report_path,omitempty"`
+	// AnalysisSkipped marks a rules-only result. It is additive and omitted
+	// from a complete scan, so a consumer written before it keeps working while
+	// one written after it can tell the two apart.
+	AnalysisSkipped bool `json:"analysis_skipped,omitempty"`
 }
 
 type jsonSkill struct {
@@ -385,14 +449,15 @@ type jsonFinding struct {
 
 // jsonInputs pairs every scan with the one report the run wrote, so a consumer
 // reading a single entry still knows where to look.
-func jsonInputs(scans []fileScan, reportPath string) []jsonInput {
+func jsonInputs(scans []fileScan, reportPath string, analysisSkipped bool) []jsonInput {
 	inputs := make([]jsonInput, 0, len(scans))
 	for _, scan := range scans {
 		inputs = append(inputs, jsonInput{
-			Path:       scan.path,
-			Skill:      scan.skill,
-			Result:     scan.result,
-			ReportPath: reportPath,
+			Path:            scan.path,
+			Skill:           scan.skill,
+			Result:          scan.result,
+			ReportPath:      reportPath,
+			AnalysisSkipped: analysisSkipped,
 		})
 	}
 
@@ -422,10 +487,11 @@ func renderJSON(inputs []jsonInput) (string, error) {
 
 func newJSONReport(input jsonInput) jsonReport {
 	payload := jsonReport{
-		Path:       input.Path,
-		Clean:      input.Result.Clean(),
-		Findings:   make([]jsonFinding, 0, len(input.Result.Findings)),
-		ReportPath: input.ReportPath,
+		Path:            input.Path,
+		Clean:           input.Result.Clean(),
+		Findings:        make([]jsonFinding, 0, len(input.Result.Findings)),
+		ReportPath:      input.ReportPath,
+		AnalysisSkipped: input.AnalysisSkipped,
 	}
 	if input.Skill != nil {
 		payload.Skill = jsonSkill{Name: input.Skill.Name, Description: input.Skill.Description}
@@ -441,180 +507,6 @@ func newJSONReport(input jsonInput) jsonReport {
 	}
 
 	return payload
-}
-
-// renderScans renders every scan in order. A run over a single file renders
-// exactly as it did before multi-file support; a run over several files heads
-// each result with its path, so findings keep their file even when some of the
-// files failed to scan.
-func renderScans(scans []fileScan, total int, style renderStyle) string {
-	var builder strings.Builder
-	for index, scan := range scans {
-		if total > 1 {
-			if index > 0 {
-				builder.WriteString("\n")
-			}
-			fmt.Fprintf(&builder, "=== %s ===\n", scan.path)
-		}
-
-		builder.WriteString(renderResult(scan.result, style))
-	}
-
-	rendered := builder.String()
-	if total <= 1 {
-		return rendered
-	}
-
-	// The clean verdict carries no newline of its own, so close the last
-	// section before the tally rather than running on from it.
-	if rendered != "" && !strings.HasSuffix(rendered, "\n") {
-		rendered += "\n"
-	}
-
-	return rendered + "\n" + renderTally(scans) + "\n"
-}
-
-// renderTally closes a multi-file run with counts that match the findings
-// printed above it. Aggregation by category belongs to the summary story, not
-// here.
-func renderTally(scans []fileScan) string {
-	counts := make(map[result.Severity]int)
-	clean, flagged, findings := 0, 0, 0
-	for _, scan := range scans {
-		if scan.result.Clean() {
-			clean++
-		} else {
-			flagged++
-		}
-		for _, finding := range scan.result.Findings {
-			findings++
-			counts[finding.Severity]++
-		}
-	}
-
-	tally := fmt.Sprintf("%s scanned · %d clean · %d flagged · %s",
-		pluralize(len(scans), "file"), clean, flagged, pluralize(findings, "finding"))
-	if breakdown := severityBreakdown(counts); breakdown != "" {
-		tally += " (" + breakdown + ")"
-	}
-
-	return tally
-}
-
-// severityBreakdown lists the known severities that actually occurred, highest
-// first. An unrecognised severity still counts towards the total; it just has
-// no bucket to sit in.
-func severityBreakdown(counts map[result.Severity]int) string {
-	parts := make([]string, 0, 3)
-	for _, severity := range []result.Severity{result.SeverityError, result.SeverityWarning, result.SeverityInfo} {
-		if count := counts[severity]; count > 0 {
-			parts = append(parts, fmt.Sprintf("%d %s", count, severity))
-		}
-	}
-
-	return strings.Join(parts, ", ")
-}
-
-func pluralize(count int, noun string) string {
-	if count == 1 {
-		return fmt.Sprintf("%d %s", count, noun)
-	}
-
-	return fmt.Sprintf("%d %ss", count, noun)
-}
-
-func renderResult(scanResult result.Result, style renderStyle) string {
-	if scanResult.Clean() {
-		return analyseCleanMessage()
-	}
-
-	var builder strings.Builder
-	fmt.Fprintf(&builder, "Scan flagged %d finding(s)", len(scanResult.Findings))
-	if sources := scanResult.Sources(); len(sources) > 0 {
-		fmt.Fprintf(&builder, " from %s checks", formatSources(sources))
-	}
-	builder.WriteString("\n")
-	for _, finding := range orderedFindings(scanResult.Findings) {
-		fmt.Fprintf(&builder, "%s %s (%s): %s\n", severityLabel(finding.Severity, style), finding.Category, finding.Source, finding.Message)
-		if finding.Evidence.Summary != "" {
-			fmt.Fprintf(&builder, "Evidence: %s\n", truncateEvidence(finding.Evidence.Summary))
-		}
-	}
-
-	return builder.String()
-}
-
-// orderedFindings sorts a copy for display, highest severity first. The sort is
-// stable so rule findings stay ahead of analyzer ones within a severity, and it
-// works on a copy so result.Result — and therefore the JSON contract — keeps
-// its merge order.
-func orderedFindings(findings []result.Finding) []result.Finding {
-	ordered := make([]result.Finding, len(findings))
-	copy(ordered, findings)
-	sort.SliceStable(ordered, func(i, j int) bool {
-		return renderRank(ordered[i].Severity) > renderRank(ordered[j].Severity)
-	})
-
-	return ordered
-}
-
-// renderRank orders a severity for display. It is deliberately separate from
-// severityRank: an unrecognised severity gates nothing, and prints last rather
-// than sharing a rank with info.
-func renderRank(severity result.Severity) int {
-	rank, ok := severityRank[severity]
-	if !ok {
-		return -1
-	}
-
-	return rank
-}
-
-func severityLabel(severity result.Severity, style renderStyle) string {
-	label := fmt.Sprintf("[%s]", severity)
-	if !style.color {
-		return label
-	}
-
-	color, ok := severityColor[severity]
-	if !ok {
-		return label
-	}
-
-	return color + label + colorReset
-}
-
-// truncateEvidence keeps a long snippet from swamping the console. The HTML
-// report still carries the full text.
-func truncateEvidence(summary string) string {
-	runes := []rune(summary)
-	if len(runes) <= maxEvidenceRunes {
-		return summary
-	}
-
-	return string(runes[:maxEvidenceRunes]) + "…"
-}
-
-func formatSources(sources []result.Source) string {
-	parts := make([]string, 0, len(sources))
-	for _, source := range sources {
-		parts = append(parts, string(source))
-	}
-
-	switch len(parts) {
-	case 0:
-		return ""
-	case 1:
-		return parts[0]
-	case 2:
-		return parts[0] + " and " + parts[1]
-	default:
-		return strings.Join(parts[:len(parts)-1], ", ") + ", and " + parts[len(parts)-1]
-	}
-}
-
-func analyseCleanMessage() string {
-	return "THIS SKILL APPEARS TO BE CLEAN, PLEASE MANUALLY VERIFY TO BE SURE"
 }
 
 func validationResultForSkill(s *skill.Skill) result.Result {

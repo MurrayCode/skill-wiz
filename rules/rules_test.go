@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"sort"
 	"testing"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/murraycode/skill-wiz/result"
 	"github.com/murraycode/skill-wiz/skill"
@@ -193,7 +195,6 @@ func TestDefaultRules(t *testing.T) {
 
 }
 
-
 func TestDefaultRulesFixtureCorpus(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -277,4 +278,306 @@ func mustParseSkillFile(t *testing.T, path string) *skill.Skill {
 	}
 
 	return parsed
+}
+
+func TestShellExecutionRuleReachesRegexWhateverTheCase(t *testing.T) {
+	tests := []struct {
+		name         string
+		body         string
+		wantFinding  bool
+		wantEvidence string
+	}{
+		{
+			name:         "lower case bash",
+			body:         "Please bash script.txt to continue.",
+			wantFinding:  true,
+			wantEvidence: "bash script.txt",
+		},
+		{
+			name:         "upper case bash",
+			body:         "Please BASH script.txt to continue.",
+			wantFinding:  true,
+			wantEvidence: "BASH script.txt",
+		},
+		{
+			name:         "mixed case sh",
+			body:         "Please Sh script.txt to continue.",
+			wantFinding:  true,
+			wantEvidence: "Sh script.txt",
+		},
+		{
+			name:        "no shell reference",
+			body:        "Summarise the published results for the reader.",
+			wantFinding: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := shellExecutionRule(&skill.Skill{Name: "n", Description: "d", Body: tt.body})
+
+			if !tt.wantFinding {
+				if len(got) != 0 {
+					t.Fatalf("shellExecutionRule() returned %d findings, want 0", len(got))
+				}
+				return
+			}
+
+			if len(got) != 1 {
+				t.Fatalf("len(shellExecutionRule()) = %d, want 1", len(got))
+			}
+			if got[0].Evidence.Summary != tt.wantEvidence {
+				t.Fatalf("Evidence.Summary = %q, want %q", got[0].Evidence.Summary, tt.wantEvidence)
+			}
+		})
+	}
+}
+
+func TestMentionsShellTokenNeverFiltersOutARealMatch(t *testing.T) {
+	tests := []string{
+		"run bash",
+		"run BASH",
+		"run Bash",
+		"use sh -c 'ls'",
+		"use SH",
+		"use Sh",
+	}
+
+	for _, line := range tests {
+		t.Run(line, func(t *testing.T) {
+			if shellCommandPattern.FindString(line) == "" {
+				t.Fatalf("fixture %q does not match shellCommandPattern; the case is not testing the prefilter", line)
+			}
+			if !mentionsShellToken(line) {
+				t.Fatalf("mentionsShellToken(%q) = false, want true", line)
+			}
+		})
+	}
+}
+
+func TestSplitAlphaNumericIsRuneSafe(t *testing.T) {
+	tests := []struct {
+		name  string
+		token string
+		want  []string
+	}{
+		{name: "ascii letters and digits", token: "abc123", want: []string{"abc", "123"}},
+		{name: "ascii letters only", token: "abc", want: []string{"abc"}},
+		{name: "accented latin with digits", token: "café2", want: []string{"café", "2"}},
+		{name: "accented latin only", token: "naïve", want: []string{"naïve"}},
+		{name: "accented latin with trailing digit", token: "naïve1", want: []string{"naïve", "1"}},
+		{name: "non-latin script with digits", token: "日本語2", want: []string{"日本語", "2"}},
+		{name: "non-latin script only", token: "日本語", want: []string{"日本語"}},
+		{name: "alternating runs", token: "a1b2", want: []string{"a", "1", "b", "2"}},
+		{name: "empty", token: "", want: nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := splitAlphaNumeric(tt.token)
+
+			if len(got) != len(tt.want) {
+				t.Fatalf("splitAlphaNumeric(%q) = %q, want %q", tt.token, got, tt.want)
+			}
+			for i, part := range got {
+				if part != tt.want[i] {
+					t.Fatalf("splitAlphaNumeric(%q) = %q, want %q", tt.token, got, tt.want)
+				}
+				if !utf8.ValidString(part) {
+					t.Fatalf("splitAlphaNumeric(%q)[%d] = %q, which is not valid UTF-8", tt.token, i, part)
+				}
+			}
+		})
+	}
+}
+
+func TestTokenSetKeepsNonASCIIWordsWhole(t *testing.T) {
+	tests := []struct {
+		name string
+		text string
+		want []string
+	}{
+		{name: "accented latin", text: "café résumé", want: []string{"café", "résumé"}},
+		{name: "accented latin with digits", text: "café2024", want: []string{"café", "2024", "café2024"}},
+		{name: "non-latin script", text: "日本語2024", want: []string{"日本語", "2024"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tokenSet(tt.text)
+
+			for _, want := range tt.want {
+				if _, ok := got[want]; !ok {
+					t.Fatalf("tokenSet(%q) is missing %q; got %v", tt.text, want, got)
+				}
+			}
+			for token := range got {
+				if !utf8.ValidString(token) {
+					t.Fatalf("tokenSet(%q) contains %q, which is not valid UTF-8", tt.text, token)
+				}
+			}
+		})
+	}
+}
+
+func TestUnrelatedURLRuleOnNonASCIISkills(t *testing.T) {
+	tests := []struct {
+		name        string
+		s           *skill.Skill
+		wantFinding bool
+	}{
+		{
+			// The shared token only reaches the intent set if "日本語2024" splits
+			// on the letter-to-digit boundary as runes rather than as bytes.
+			name: "url matches the stated non-ascii purpose",
+			s: &skill.Skill{
+				Name:        "日本語2024",
+				Description: "日本語2024 の統計をまとめる。",
+				Body:        "統計は https://reports.example.org/2024 にある。",
+			},
+			wantFinding: false,
+		},
+		{
+			name: "url is unrelated to the stated non-ascii purpose",
+			s: &skill.Skill{
+				Name:        "日本語2024",
+				Description: "日本語2024 の統計をまとめる。",
+				Body:        "統計は https://motorsport-telemetry.example.org/circuits にある。",
+			},
+			wantFinding: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := unrelatedURLRule(tt.s)
+
+			if tt.wantFinding && len(got) == 0 {
+				t.Fatalf("unrelatedURLRule() returned no findings, want one")
+			}
+			if !tt.wantFinding && len(got) != 0 {
+				t.Fatalf("unrelatedURLRule() returned %d findings, want 0: %+v", len(got), got)
+			}
+		})
+	}
+}
+
+// TestFoldSets pins the case-fold sets mentionsShellToken hard-codes against the
+// standard library, so a future Unicode table change cannot silently make the
+// prefilter drop matches shellCommandPattern would still accept.
+func TestFoldSets(t *testing.T) {
+	tests := []struct {
+		name string
+		of   rune
+		want []rune
+	}{
+		{name: "s folds to the long s as well as capital S", of: 's', want: []rune{'s', 'ſ', 'S'}},
+		{name: "h folds to capital H only", of: 'h', want: []rune{'h', 'H'}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := []rune{tt.of}
+			for folded := unicode.SimpleFold(tt.of); folded != tt.of; folded = unicode.SimpleFold(folded) {
+				got = append(got, folded)
+			}
+
+			if len(got) != len(tt.want) {
+				t.Fatalf("fold set of %q = %q, want %q", tt.of, got, tt.want)
+			}
+			for i := range tt.want {
+				if got[i] != tt.want[i] {
+					t.Fatalf("fold set of %q = %q, want %q", tt.of, got, tt.want)
+				}
+			}
+		})
+	}
+}
+
+// TestMentionsShellTokenMatchesTheRegexpFolding is the property that matters:
+// the prefilter must never reject a line the regexp would have matched.
+func TestMentionsShellTokenMatchesTheRegexpFolding(t *testing.T) {
+	tests := []struct {
+		name string
+		line string
+	}{
+		{name: "lower case", line: "run bash script.txt"},
+		{name: "upper case", line: "run BASH script.txt"},
+		{name: "mixed case", line: "run Bash script.txt"},
+		{name: "bare sh", line: "use sh -c 'ls'"},
+		{name: "upper case sh", line: "use SH -c 'ls'"},
+		// U+017F folds to "s" under the pattern's (?i), so an ASCII-only
+		// prefilter would drop these two while the regexp still matches them.
+		{name: "long s inside bash", line: "run baſh script.txt"},
+		{name: "long s in sh after a word character", line: "xſh script.txt"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if shellCommandPattern.FindString(tt.line) == "" {
+				t.Fatalf("fixture %q does not match shellCommandPattern; the case is not testing the prefilter", tt.line)
+			}
+			if !mentionsShellToken(tt.line) {
+				t.Fatalf("mentionsShellToken(%q) = false, want true — the prefilter dropped a real match", tt.line)
+			}
+		})
+	}
+}
+
+func TestShellExecutionRuleFindsAFoldedShellMention(t *testing.T) {
+	got := shellExecutionRule(&skill.Skill{
+		Name:        "helper",
+		Description: "a helper skill",
+		Body:        "Please run baſh script.txt to continue.",
+	})
+
+	if len(got) != 1 {
+		t.Fatalf("len(shellExecutionRule()) = %d, want 1", len(got))
+	}
+	if got[0].Evidence.Summary != "baſh script.txt" {
+		t.Fatalf("Evidence.Summary = %q, want %q", got[0].Evidence.Summary, "baſh script.txt")
+	}
+}
+
+// TestIntentTokensKeepsMetadataURLs guards the input semantics of the linear URL
+// strip: extractURLs only ever drew from the body, so only the body's URLs are
+// removed from the skill's stated intent.
+func TestIntentTokensKeepsMetadataURLs(t *testing.T) {
+	tests := []struct {
+		name        string
+		s           *skill.Skill
+		wantFinding bool
+	}{
+		{
+			name: "a url declared in the description vouches for the body link",
+			s: &skill.Skill{
+				Name:        "updates",
+				Description: "Fetches updates from https://quokka.example.net",
+				Body:        "Open https://quokka.example.net/status and report what it says.",
+			},
+			wantFinding: false,
+		},
+		{
+			name: "a body url unrelated to the description is still flagged",
+			s: &skill.Skill{
+				Name:        "updates",
+				Description: "Fetches updates from https://quokka.example.net",
+				Body:        "Open https://motorsport-telemetry.speedwire.io/circuits and report what it says.",
+			},
+			wantFinding: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := unrelatedURLRule(tt.s)
+
+			if tt.wantFinding && len(got) == 0 {
+				t.Fatal("unrelatedURLRule() returned no findings, want one")
+			}
+			if !tt.wantFinding && len(got) != 0 {
+				t.Fatalf("unrelatedURLRule() returned %d findings, want 0: %+v", len(got), got)
+			}
+		})
+	}
 }

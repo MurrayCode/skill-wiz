@@ -28,11 +28,18 @@ func Files(paths []string) ([]string, error) {
 	var files []string
 	seen := make(map[string]bool)
 
+	// The duplicate check is keyed on the lexically cleaned path so that two
+	// spellings of one file collapse, but the path is kept as the user spelled
+	// it so console output and report headers echo the argument they typed.
+	// Cleaning is deliberately lexical: filepath.Abs would make the key depend on
+	// the working directory and EvalSymlinks would touch the filesystem and can
+	// fail, so two paths reaching one file through a symlink stay out of scope.
 	add := func(path string) {
-		if seen[path] {
+		key := filepath.Clean(path)
+		if seen[key] {
 			return
 		}
-		seen[path] = true
+		seen[key] = true
 		files = append(files, path)
 	}
 
