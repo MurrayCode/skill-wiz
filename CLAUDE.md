@@ -47,11 +47,11 @@ Data flows one way, and every layer returns findings rather than printing:
 - **`rules`** holds the deterministic checks — `Default()` is empty-body, shell-execution,
   unrelated-URL, and description-mismatch. A rule is anything with
   `Check(*skill.Skill) []result.Finding`; `RuleFunc` adapts plain functions.
-- **`analyse`** wraps Gemini behind the same contract. `GeminiAnalyzer.Analyze(*skill.Skill)` builds
-  the payload and delegates to the package-level `AnalyzeWithConfig(prompt string, Config)` — two
-  different `Analyze`s, don't confuse them. `Config` carries `Model` and `Timeout`; its zero value
-  means `DefaultModel` / `DefaultTimeout`, and the timeout bounds the request context. The older
-  `Analyze(prompt string)` is now just the default-config shorthand.
+- **`analyse`** wraps Gemini behind the same contract. `GeminiAnalyzer.Analyze(*skill.Skill)` is the
+  **only** exported way to the model: it builds the hardened payload and delegates to the unexported
+  `analyzeWithConfig(prompt string, Config)`. `Config` carries `Model` and `Timeout`; its zero value
+  means `DefaultModel` / `DefaultTimeout`, and the timeout bounds the request context. `HasAPIKey`
+  is the preflight check, and is the only other exported function.
 - **`scanner`** orchestrates. It owns the `Analyzer` interface
   (`Analyze(*skill.Skill) (result.Result, error)`) and `AnalyzerFunc`, so the LLM is optional and
   swappable.
@@ -164,8 +164,11 @@ The analyzer audits hostile input, so untrusted text must never be able to read 
   escaped by `encoding/json` rather than by string concatenation.
 - The system instruction explicitly tells the model to treat user content as data.
 - `Temperature: 0` and `ResponseMIMEType: "application/json"`.
+- **A skill goes in, a result comes out.** There is no exported entry point taking a caller-supplied
+  prompt string, so the payload construction cannot be bypassed. Do not add one back — that is what
+  makes the hardening structural rather than a convention.
 
-Keep all four properties if you touch prompt construction.
+Keep all five properties if you touch prompt construction.
 
 ### Test seams
 

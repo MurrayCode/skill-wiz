@@ -112,14 +112,17 @@ type GeminiAnalyzer struct {
 	Config Config
 }
 
-// Analyze runs a prompt with the default configuration.
-func Analyze(prompt string) (result.Result, error) {
-	return AnalyzeWithConfig(prompt, Config{})
-}
-
-// AnalyzeWithConfig runs a prompt with caller-supplied model and timeout
-// settings, falling back to the package defaults for anything left unset.
-func AnalyzeWithConfig(prompt string, config Config) (result.Result, error) {
+// analyzeWithConfig sends an already-built prompt with caller-supplied model and
+// timeout settings, falling back to the package defaults for anything left
+// unset.
+//
+// It is deliberately unexported. GeminiAnalyzer.Analyze is the only way into
+// this package, so every request goes through promptForSkill and carries the
+// P3-002 hardening: skill content as JSON inside <skill_input>, escaped by
+// encoding/json rather than by string concatenation. An exported
+// prompt-string entry point would let a caller put arbitrary text exactly where
+// untrusted content is supposed to sit, already labelled as data.
+func analyzeWithConfig(prompt string, config Config) (result.Result, error) {
 	config = config.withDefaults()
 
 	ctx, cancel := context.WithTimeout(context.Background(), config.Timeout)
@@ -160,7 +163,7 @@ func (a GeminiAnalyzer) Analyze(s *skill.Skill) (result.Result, error) {
 		return result.Result{}, errors.New("nil skill")
 	}
 
-	return AnalyzeWithConfig(promptForSkill(s), a.Config)
+	return analyzeWithConfig(promptForSkill(s), a.Config)
 }
 
 func promptForSkill(s *skill.Skill) string {
