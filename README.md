@@ -111,13 +111,23 @@ Without it the rules still run — you just lose the enrichment layer.
 go run . examples/HIDDENBASHSKILL.md         # or straight from source
 ```
 
+Pass as many paths as you like. A named file is scanned whatever its extension; a directory is
+walked for `.md` files, skipping hidden entries so `.git` never reaches the scanner:
+
+```bash
+skill-wiz examples                                    # every .md file in a directory
+skill-wiz examples/CLEANSKILL.md examples/MISMATCHSKILL.md   # several files
+skill-wiz ~/.claude/skills ./team-skills              # directories and files together
+```
+
 | Flag | Default | Description |
 | --- | --- | --- |
 | `--json` | `false` | Print the result as JSON and nothing else |
 | `--model` | `gemini-2.5-flash` | Gemini model used for the analysis leg |
 | `--timeout` | `1m` | Maximum time to wait for the analysis leg |
 
-Exactly one skill file per run.
+One unreadable or unparseable file never hides the rest: it is reported on stderr and the run
+carries on. However many files a run covers, it writes one HTML report.
 
 ## Output
 
@@ -129,6 +139,19 @@ A clean skill gets one verdict line — with a deliberate reminder that a clean 
 ```console
 $ skill-wiz examples/CLEANSKILL.md
 THIS SKILL APPEARS TO BE CLEAN, PLEASE MANUALLY VERIFY TO BE SURE
+```
+
+A run over more than one file heads each result with its path:
+
+```console
+$ skill-wiz examples
+=== examples/CLEANSKILL.md ===
+THIS SKILL APPEARS TO BE CLEAN, PLEASE MANUALLY VERIFY TO BE SURE
+=== examples/HIDDENBASHSKILL.md ===
+Scan flagged 2 finding(s) from rule checks
+[error] shell (rule): skill references local shell script execution
+Evidence: ./scripts/racing.sh
+...
 ```
 
 ### JSON
@@ -159,12 +182,16 @@ THIS SKILL APPEARS TO BE CLEAN, PLEASE MANUALLY VERIFY TO BE SURE
 `source` is one of `validation`, `rule`, or `analyzer`, so you always know whether a finding was
 earned deterministically or suggested by the model.
 
+A single file emits that object; a run over several files emits a JSON **array** of the same object,
+one entry per scanned file, each carrying the same `report_path`.
+
 ### HTML report
 
-Every scan also writes a self-contained `skill-wiz-report.html` to the working directory: findings
+Every run also writes a self-contained `skill-wiz-report.html` to the working directory: findings
 grouped by severity, with category, source, and evidence for each. No external assets, so it opens
-straight from disk. Each scan overwrites the last, and a report that cannot be written is a warning
-— never a failed scan.
+straight from disk. One run writes one report however many files it covered — every scanned skill
+lands on the same page, with a picker to move between them. Each run overwrites the last, and a
+report that cannot be written is a warning — never a failed scan.
 
 ## Skill file format
 
@@ -212,6 +239,7 @@ The rule heuristics are keyword-based and tuned against those three — retune o
 
 ```text
 main.go     flag parsing, wiring, rendering
+discover/   expands CLI paths into the skill files to scan
 skill/      frontmatter parsing and validation
 rules/      deterministic checks
 analyse/    Gemini client and prompt hardening

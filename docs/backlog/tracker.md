@@ -52,17 +52,17 @@ This tracker records implementation progress for backlog stories in `docs/backlo
 | --- | --- | --- | --- |
 | `P4-001-cli-flags.md` | `done` | 2026-08-30 | Added `--json`, `--model`, and `--timeout` flag parsing with clear invalid-value errors, threaded an `analyse.Config` through the analyzer seam, added machine-readable JSON output, and verified `go test ./...`. |
 | `P4-002-multi-file-scanning.md` | `done` | 2026-08-30 | Added a `discover` package that expands file and directory paths into skill files, scanned every discovered file per run without letting one bad file stop the rest, headed multi-file output with per-file paths, rendered every scanned skill into one HTML report with a dropdown picker, and extended `--json` to an array for multi-file runs. Verified `go test ./...`. |
-| `P4-003-exit-codes.md` | `todo` |  |  |
-| `P4-004-human-readable-output.md` | `todo` |  |  |
-| `P4-005-readme-usage.md` | `todo` |  |  |
+| `P4-003-exit-codes.md` | `todo` |  | Story rewritten 2026-08-31: exit code contract fixed at 0/1/2 with a `--fail-on` threshold and stated precedence. |
+| `P4-004-human-readable-output.md` | `todo` |  | Story rewritten 2026-08-31: scope narrowed to what `P4-002`/`P4-006` did not already deliver — severity ordering, run tally, colour, evidence truncation. |
+| `P4-005-readme-usage.md` | `done` | 2026-08-31 | README already covered install, usage, environment variables and tests; corrected the stale single-file claim after `P4-002`, documented multi-path and directory scanning, the multi-file console and JSON array shapes, the one-run-one-report page, and the `discover` package in the layout. |
 | `P4-006-html-report.md` | `done` | 2026-08-30 | Added a `report` package that renders scans to a self-contained dark-themed HTML page, wired it into the CLI with a `file://` pointer, and verified `go test ./...`. |
 
 ## Phase 5
 
 | Story | Status | Completed On | Notes |
 | --- | --- | --- | --- |
-| `P5-001-policy-support.md` | `todo` |  |  |
-| `P5-002-environment-specific-rules.md` | `todo` |  |  |
-| `P5-003-severity-overrides.md` | `todo` |  |  |
-| `P5-004-repository-summary-reporting.md` | `todo` |  |  |
-| `P5-005-publishing-integrations.md` | `todo` |  |  |
+| `P5-001-policy-support.md` | `todo` |  | Story rewritten 2026-08-31: adds stable rule IDs as a prerequisite; policy format, discovery and initial key set decided. |
+| `P5-002-environment-specific-rules.md` | `todo` |  | Story rewritten 2026-08-31: scoped to named profiles selected by `--profile`, inheriting everything else from `P5-001`. |
+| `P5-003-severity-overrides.md` | `todo` |  | Story rewritten 2026-08-31: keyed by rule ID, applied after `Merge`, with an additive `overridden_from` JSON field. |
+| `P5-004-repository-summary-reporting.md` | `todo` |  | Story rewritten 2026-08-31: summary is opt-in via `--summary` so the existing JSON contract is untouched; policy dependency dropped. |
+| `P5-005-publishing-integrations.md` | `todo` |  | Story rewritten 2026-08-31 as a spike delivering `docs/publishing-integration.md`; no production code. |
