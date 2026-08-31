@@ -392,14 +392,27 @@ func splitAlphaNumeric(token string) []string {
 		return nil
 	}
 
+	// Range over runes rather than bytes: indexing a string yields single bytes,
+	// so classifying a UTF-8 continuation byte as a rune would split multi-byte
+	// characters apart and put invalid UTF-8 into the token set.
 	parts := make([]string, 0, len(token))
 	start := 0
-	for i := 1; i < len(token); i++ {
-		if unicode.IsLetter(rune(token[i-1])) == unicode.IsLetter(rune(token[i])) {
+	first := true
+	previousIsLetter := false
+	for i, r := range token {
+		isLetter := unicode.IsLetter(r)
+		if first {
+			first = false
+			previousIsLetter = isLetter
 			continue
 		}
+		if isLetter == previousIsLetter {
+			continue
+		}
+
 		parts = append(parts, token[start:i])
 		start = i
+		previousIsLetter = isLetter
 	}
 	parts = append(parts, token[start:])
 	return parts

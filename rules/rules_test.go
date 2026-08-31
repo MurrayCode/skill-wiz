@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"sort"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/murraycode/skill-wiz/result"
 	"github.com/murraycode/skill-wiz/skill"
@@ -349,6 +350,113 @@ func TestMentionsShellTokenNeverFiltersOutARealMatch(t *testing.T) {
 			}
 			if !mentionsShellToken(line) {
 				t.Fatalf("mentionsShellToken(%q) = false, want true", line)
+			}
+		})
+	}
+}
+
+func TestSplitAlphaNumericIsRuneSafe(t *testing.T) {
+	tests := []struct {
+		name  string
+		token string
+		want  []string
+	}{
+		{name: "ascii letters and digits", token: "abc123", want: []string{"abc", "123"}},
+		{name: "ascii letters only", token: "abc", want: []string{"abc"}},
+		{name: "accented latin with digits", token: "café2", want: []string{"café", "2"}},
+		{name: "accented latin only", token: "naïve", want: []string{"naïve"}},
+		{name: "accented latin with trailing digit", token: "naïve1", want: []string{"naïve", "1"}},
+		{name: "non-latin script with digits", token: "日本語2", want: []string{"日本語", "2"}},
+		{name: "non-latin script only", token: "日本語", want: []string{"日本語"}},
+		{name: "alternating runs", token: "a1b2", want: []string{"a", "1", "b", "2"}},
+		{name: "empty", token: "", want: nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := splitAlphaNumeric(tt.token)
+
+			if len(got) != len(tt.want) {
+				t.Fatalf("splitAlphaNumeric(%q) = %q, want %q", tt.token, got, tt.want)
+			}
+			for i, part := range got {
+				if part != tt.want[i] {
+					t.Fatalf("splitAlphaNumeric(%q) = %q, want %q", tt.token, got, tt.want)
+				}
+				if !utf8.ValidString(part) {
+					t.Fatalf("splitAlphaNumeric(%q)[%d] = %q, which is not valid UTF-8", tt.token, i, part)
+				}
+			}
+		})
+	}
+}
+
+func TestTokenSetKeepsNonASCIIWordsWhole(t *testing.T) {
+	tests := []struct {
+		name string
+		text string
+		want []string
+	}{
+		{name: "accented latin", text: "café résumé", want: []string{"café", "résumé"}},
+		{name: "accented latin with digits", text: "café2024", want: []string{"café", "2024", "café2024"}},
+		{name: "non-latin script", text: "日本語2024", want: []string{"日本語", "2024"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tokenSet(tt.text)
+
+			for _, want := range tt.want {
+				if _, ok := got[want]; !ok {
+					t.Fatalf("tokenSet(%q) is missing %q; got %v", tt.text, want, got)
+				}
+			}
+			for token := range got {
+				if !utf8.ValidString(token) {
+					t.Fatalf("tokenSet(%q) contains %q, which is not valid UTF-8", tt.text, token)
+				}
+			}
+		})
+	}
+}
+
+func TestUnrelatedURLRuleOnNonASCIISkills(t *testing.T) {
+	tests := []struct {
+		name        string
+		s           *skill.Skill
+		wantFinding bool
+	}{
+		{
+			// The shared token only reaches the intent set if "日本語2024" splits
+			// on the letter-to-digit boundary as runes rather than as bytes.
+			name: "url matches the stated non-ascii purpose",
+			s: &skill.Skill{
+				Name:        "日本語2024",
+				Description: "日本語2024 の統計をまとめる。",
+				Body:        "統計は https://reports.example.org/2024 にある。",
+			},
+			wantFinding: false,
+		},
+		{
+			name: "url is unrelated to the stated non-ascii purpose",
+			s: &skill.Skill{
+				Name:        "日本語2024",
+				Description: "日本語2024 の統計をまとめる。",
+				Body:        "統計は https://motorsport-telemetry.example.org/circuits にある。",
+			},
+			wantFinding: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := unrelatedURLRule(tt.s)
+
+			if tt.wantFinding && len(got) == 0 {
+				t.Fatalf("unrelatedURLRule() returned no findings, want one")
+			}
+			if !tt.wantFinding && len(got) != 0 {
+				t.Fatalf("unrelatedURLRule() returned %d findings, want 0: %+v", len(got), got)
 			}
 		})
 	}

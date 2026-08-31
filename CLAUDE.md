@@ -121,7 +121,9 @@ Data flows one way, and every layer returns findings rather than printing:
   never read as "clean".
 - The rule heuristics are keyword/token based and were tuned against the fixtures in `examples/`.
   Changing tokenisation (`tokenSet`, `keywords`, `ignoredToken`, `weakMismatchOverlap`) will move
-  fixture results — re-run `go test ./rules/...`.
+  fixture results — re-run `go test ./rules/...`. Tokenisation must also stay **rune-safe**: iterate
+  runes, never byte indices, or multi-byte characters tear apart and invalid UTF-8 poisons the token
+  set (`splitAlphaNumeric` is the one that got this wrong).
 
 ### Prompt hardening — do not regress this
 
