@@ -125,9 +125,32 @@ skill-wiz ~/.claude/skills ./team-skills              # directories and files to
 | `--json` | `false` | Print the result as JSON and nothing else |
 | `--model` | `gemini-2.5-flash` | Gemini model used for the analysis leg |
 | `--timeout` | `1m` | Maximum time to wait for the analysis leg |
+| `--fail-on` | `error` | Lowest finding severity that fails the run: `error`, `warning`, or `info` |
 
 One unreadable or unparseable file never hides the rest: it is reported on stderr and the run
 carries on. However many files a run covers, it writes one HTML report.
+
+### Exit codes
+
+| Code | Meaning |
+| --- | --- |
+| `0` | every scanned file was clean at or above the active threshold |
+| `1` | operational failure — usage, discovery, read, parse, or scan error |
+| `2` | at least one finding at or above the active threshold |
+
+`--fail-on` sets the threshold. By default only `error` findings fail a run, so a skill flagged
+solely with warnings exits `0`; `--fail-on warning` gates on those too, and `--fail-on info` fails
+on any finding at all. Validation findings are `error` severity, so a skill missing `name` or
+`description` exits `2` by default.
+
+An operational failure outranks findings: if any file failed to read, parse, or scan, the run exits
+`1` even when another file was flagged — the flagged findings are still printed and still in the
+report. `--json` exits exactly as the text path does.
+
+```bash
+skill-wiz ~/.claude/skills || echo "flagged or failed"   # gate a pipeline on error findings
+skill-wiz --fail-on warning ~/.claude/skills             # gate on warnings as well
+```
 
 ## Output
 
@@ -254,7 +277,5 @@ docs/       proposal.md roadmap and the story backlog
 
 ## Caveats
 
-- **Findings do not affect the exit code yet.** A flagged skill still exits `0`; only usage, read,
-  parse, and scan *errors* exit `1`.
 - **The model layer is advisory.** Treat every finding as a review aid, not a verdict — and read the
   skill yourself before trusting it.
