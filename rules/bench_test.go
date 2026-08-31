@@ -54,11 +54,19 @@ func BenchmarkUnrelatedURLRule(b *testing.B) {
 	}
 }
 
-func BenchmarkShellExecutionRule(b *testing.B) {
+func BenchmarkShellScriptRule(b *testing.B) {
 	s := benchSkill(200)
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		shellExecutionRule(s)
+		shellScriptRule(s)
+	}
+}
+
+func BenchmarkShellCommandRule(b *testing.B) {
+	s := benchSkill(200)
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		shellCommandRule(s)
 	}
 }
 

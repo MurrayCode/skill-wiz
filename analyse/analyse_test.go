@@ -572,10 +572,10 @@ func TestGeminiAnalyzerAnalyzeMalformedResponseIsNotClean(t *testing.T) {
 // failure paths are covered the way the CLI hits them and without remote access.
 func TestScanWithGeminiAnalyzerFailureModes(t *testing.T) {
 	cleanRules := []rules.Rule{
-		rules.RuleFunc(func(*skill.Skill) []result.Finding { return nil }),
+		rules.RuleFunc{Checker: func(*skill.Skill) []result.Finding { return nil }},
 	}
 	flaggingRules := []rules.Rule{
-		rules.RuleFunc(func(*skill.Skill) []result.Finding {
+		rules.RuleFunc{Checker: func(*skill.Skill) []result.Finding {
 			return []result.Finding{{
 				Source:   result.SourceRule,
 				Category: result.Category("shell"),
@@ -583,7 +583,7 @@ func TestScanWithGeminiAnalyzerFailureModes(t *testing.T) {
 				Message:  "skill references local shell script execution",
 				Evidence: result.Evidence{Summary: "./scripts/racing.sh"},
 			}}
-		}),
+		}},
 	}
 
 	tests := []struct {

@@ -548,7 +548,7 @@ func TestRun(t *testing.T) {
 			wantCode:    exitClean,
 			wantAnalyze: true,
 			rules: []rules.Rule{
-				rules.RuleFunc(func(*skill.Skill) []result.Finding {
+				rules.RuleFunc{Checker: func(*skill.Skill) []result.Finding {
 					return []result.Finding{{
 						Source:   result.SourceRule,
 						Category: result.Category("shell"),
@@ -556,7 +556,7 @@ func TestRun(t *testing.T) {
 						Message:  "shell execution found",
 						Evidence: result.Evidence{Summary: "bash command in body"},
 					}}
-				}),
+				}},
 			},
 			analyzer: scanner.AnalyzerFunc(func(*skill.Skill) (result.Result, error) {
 				return result.NewResult(result.Finding{

@@ -61,7 +61,7 @@ This tracker records implementation progress for backlog stories in `docs/backlo
 
 | Story | Status | Completed On | Notes |
 | --- | --- | --- | --- |
-| `P5-001-policy-support.md` | `todo` |  | Story rewritten 2026-08-31: adds stable rule IDs as a prerequisite; policy format, discovery and initial key set decided. |
+| `P5-001-policy-support.md` | `in_progress` |  | Stable rule IDs landed as the prerequisite commit; the policy package and CLI wiring are next. |
 | `P5-002-environment-specific-rules.md` | `todo` |  | Story rewritten 2026-08-31: scoped to named profiles selected by `--profile`, inheriting everything else from `P5-001`. |
 | `P5-003-severity-overrides.md` | `todo` |  | Story rewritten 2026-08-31: keyed by rule ID, applied after `Merge`, with an additive `overridden_from` JSON field. |
 | `P5-004-repository-summary-reporting.md` | `todo` |  | Story rewritten 2026-08-31: summary is opt-in via `--summary` so the existing JSON contract is untouched; policy dependency dropped. |

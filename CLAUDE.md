@@ -44,9 +44,11 @@ Data flows one way, and every layer returns findings rather than printing:
 - **`skill`** parses and validates only. `Parse` normalises CRLF and accepts both a `\n---\n` closing
   fence and a trailing `\n---` at EOF. `Validate` returns `ValidationErrors` (a slice of field-level
   `ValidationError`), which `main` unpacks into one finding per missing field.
-- **`rules`** holds the deterministic checks — `Default()` is empty-body, shell-execution,
-  unrelated-URL, and description-mismatch. A rule is anything with
-  `Check(*skill.Skill) []result.Finding`; `RuleFunc` adapts plain functions.
+- **`rules`** holds the deterministic checks — `Default()` is empty-body, shell-script,
+  shell-command, unrelated-URL, and description-mismatch. A rule is anything with
+  `ID() string` and `Check(*skill.Skill) []result.Finding`; `RuleFunc` pairs a plain function with
+  its ID, and `IDs` lists a rule set's identifiers. The IDs are a **public contract** — policy files
+  name rules by them, so add IDs but never rename one.
 - **`analyse`** wraps Gemini behind the same contract. `GeminiAnalyzer.Analyze(*skill.Skill)` is the
   **only** exported way to the model: it builds the hardened payload and delegates to the unexported
   `analyzeWithConfig(prompt string, Config)`. `Config` carries `Model` and `Timeout`; its zero value
@@ -158,6 +160,11 @@ Data flows one way, and every layer returns findings rather than printing:
   vocabulary with the skill's stated intent, and a URL the name or description declares *is* part of
   that intent — only the body's own links are removed, so a link cannot vouch for itself. Stripping
   the joined string instead would newly flag body URLs that a metadata URL used to vouch for.
+- **`shell-command` stands down on a body `shell-script` already claimed.** The line naming a local
+  script almost always mentions `bash` or `sh` too, so `shellCommandRule` returns nothing when
+  `localShellScriptPattern` matches anywhere in the body — one problem, one finding. It defers on the
+  *pattern*, not on whether the other rule ran, so disabling `shell-script` through policy removes
+  that finding without a warning appearing in its place.
 - The rule heuristics are keyword/token based and were tuned against the fixtures in `examples/`.
   Changing tokenisation (`tokenSet`, `keywords`, `ignoredToken`, `weakMismatchOverlap`) will move
   fixture results — re-run `go test ./rules/...`. Tokenisation must also stay **rune-safe**: iterate

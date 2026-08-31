@@ -28,7 +28,7 @@ func TestScanRunsWithoutAnalyzer(t *testing.T) {
 	s := &skill.Skill{Name: "test skill", Description: "a test skill", Body: "body"}
 	scanner := Scanner{
 		Rules: []rules.Rule{
-			rules.RuleFunc(func(*skill.Skill) []result.Finding { return nil }),
+			rules.RuleFunc{Checker: func(*skill.Skill) []result.Finding { return nil }},
 		},
 	}
 
@@ -52,7 +52,7 @@ func TestScanCallsInjectedAnalyzerWhenRulesAreClean(t *testing.T) {
 	})}
 	scanner := Scanner{
 		Rules: []rules.Rule{
-			rules.RuleFunc(func(*skill.Skill) []result.Finding { return nil }),
+			rules.RuleFunc{Checker: func(*skill.Skill) []result.Finding { return nil }},
 		},
 		Analyzer: analyzer,
 	}
@@ -83,14 +83,14 @@ func TestScanMergesRuleAndAnalyzerFindings(t *testing.T) {
 	})}
 	scanner := Scanner{
 		Rules: []rules.Rule{
-			rules.RuleFunc(func(*skill.Skill) []result.Finding {
+			rules.RuleFunc{Checker: func(*skill.Skill) []result.Finding {
 				return []result.Finding{{
 					Source:   result.SourceRule,
 					Category: result.Category("shell"),
 					Severity: result.SeverityWarning,
 					Message:  "shell execution found",
 				}}
-			}),
+			}},
 		},
 		Analyzer: analyzer,
 	}
@@ -130,7 +130,7 @@ func TestScanDeDuplicatesOverlappingRuleAndAnalyzerFindings(t *testing.T) {
 	})}
 	scanner := Scanner{
 		Rules: []rules.Rule{
-			rules.RuleFunc(func(*skill.Skill) []result.Finding {
+			rules.RuleFunc{Checker: func(*skill.Skill) []result.Finding {
 				return []result.Finding{{
 					Source:   result.SourceRule,
 					Category: result.Category("shell"),
@@ -138,7 +138,7 @@ func TestScanDeDuplicatesOverlappingRuleAndAnalyzerFindings(t *testing.T) {
 					Message:  "shell execution found",
 					Evidence: result.Evidence{Summary: "bash command in body"},
 				}}
-			}),
+			}},
 		},
 		Analyzer: analyzer,
 	}
@@ -163,7 +163,7 @@ func TestScanReturnsAnalyzerError(t *testing.T) {
 	analyzer := &stubAnalyzer{err: errors.New("missing GEMINI_API_KEY")}
 	scanner := Scanner{
 		Rules: []rules.Rule{
-			rules.RuleFunc(func(*skill.Skill) []result.Finding { return nil }),
+			rules.RuleFunc{Checker: func(*skill.Skill) []result.Finding { return nil }},
 		},
 		Analyzer: analyzer,
 	}
@@ -185,7 +185,7 @@ func TestScanReturnsRuleFindingsWhenAnalyzerFailsAfterRulesFlagged(t *testing.T)
 	analyzer := &stubAnalyzer{err: errors.New("missing GEMINI_API_KEY")}
 	scanner := Scanner{
 		Rules: []rules.Rule{
-			rules.RuleFunc(func(*skill.Skill) []result.Finding {
+			rules.RuleFunc{Checker: func(*skill.Skill) []result.Finding {
 				return []result.Finding{{
 					Source:   result.SourceRule,
 					Category: result.Category("shell"),
@@ -193,7 +193,7 @@ func TestScanReturnsRuleFindingsWhenAnalyzerFailsAfterRulesFlagged(t *testing.T)
 					Message:  "shell execution found",
 					Evidence: result.Evidence{Summary: "bash command in body"},
 				}}
-			}),
+			}},
 		},
 		Analyzer: analyzer,
 	}

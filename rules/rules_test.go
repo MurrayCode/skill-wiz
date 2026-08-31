@@ -16,7 +16,7 @@ func TestScanAggregatesFindingsInRuleOrder(t *testing.T) {
 	var order []string
 	s := &skill.Skill{Name: "test skill", Description: "desc"}
 
-	ruleOne := RuleFunc(func(*skill.Skill) []result.Finding {
+	ruleOne := RuleFunc{Checker: func(*skill.Skill) []result.Finding {
 		order = append(order, "one")
 		return []result.Finding{{
 			Source:   result.SourceRule,
@@ -24,8 +24,8 @@ func TestScanAggregatesFindingsInRuleOrder(t *testing.T) {
 			Severity: result.SeverityWarning,
 			Message:  "first finding",
 		}}
-	})
-	ruleTwo := RuleFunc(func(*skill.Skill) []result.Finding {
+	}}
+	ruleTwo := RuleFunc{Checker: func(*skill.Skill) []result.Finding {
 		order = append(order, "two")
 		return []result.Finding{{
 			Source:   result.SourceRule,
@@ -33,7 +33,7 @@ func TestScanAggregatesFindingsInRuleOrder(t *testing.T) {
 			Severity: result.SeverityError,
 			Message:  "second finding",
 		}}
-	})
+	}}
 
 	got := Scan(s, ruleOne, ruleTwo)
 
@@ -58,8 +58,8 @@ func TestScanReturnsCleanResultWhenRulesDoNotReportFindings(t *testing.T) {
 	s := &skill.Skill{Name: "test skill", Description: "desc"}
 
 	got := Scan(s,
-		RuleFunc(func(*skill.Skill) []result.Finding { return nil }),
-		RuleFunc(func(*skill.Skill) []result.Finding { return []result.Finding{} }),
+		RuleFunc{Checker: func(*skill.Skill) []result.Finding { return nil }},
+		RuleFunc{Checker: func(*skill.Skill) []result.Finding { return []result.Finding{} }},
 	)
 
 	if !got.Clean() {
@@ -314,17 +314,17 @@ func TestShellExecutionRuleReachesRegexWhateverTheCase(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := shellExecutionRule(&skill.Skill{Name: "n", Description: "d", Body: tt.body})
+			got := shellCommandRule(&skill.Skill{Name: "n", Description: "d", Body: tt.body})
 
 			if !tt.wantFinding {
 				if len(got) != 0 {
-					t.Fatalf("shellExecutionRule() returned %d findings, want 0", len(got))
+					t.Fatalf("shellCommandRule() returned %d findings, want 0", len(got))
 				}
 				return
 			}
 
 			if len(got) != 1 {
-				t.Fatalf("len(shellExecutionRule()) = %d, want 1", len(got))
+				t.Fatalf("len(shellCommandRule()) = %d, want 1", len(got))
 			}
 			if got[0].Evidence.Summary != tt.wantEvidence {
 				t.Fatalf("Evidence.Summary = %q, want %q", got[0].Evidence.Summary, tt.wantEvidence)
@@ -525,14 +525,14 @@ func TestMentionsShellTokenMatchesTheRegexpFolding(t *testing.T) {
 }
 
 func TestShellExecutionRuleFindsAFoldedShellMention(t *testing.T) {
-	got := shellExecutionRule(&skill.Skill{
+	got := shellCommandRule(&skill.Skill{
 		Name:        "helper",
 		Description: "a helper skill",
 		Body:        "Please run baſh script.txt to continue.",
 	})
 
 	if len(got) != 1 {
-		t.Fatalf("len(shellExecutionRule()) = %d, want 1", len(got))
+		t.Fatalf("len(shellCommandRule()) = %d, want 1", len(got))
 	}
 	if got[0].Evidence.Summary != "baſh script.txt" {
 		t.Fatalf("Evidence.Summary = %q, want %q", got[0].Evidence.Summary, "baſh script.txt")
@@ -577,6 +577,120 @@ func TestIntentTokensKeepsMetadataURLs(t *testing.T) {
 			}
 			if !tt.wantFinding && len(got) != 0 {
 				t.Fatalf("unrelatedURLRule() returned %d findings, want 0: %+v", len(got), got)
+			}
+		})
+	}
+}
+
+func TestDefaultRuleIDs(t *testing.T) {
+	// These identifiers are a public contract: a policy file names a rule by
+	// its ID, so renaming one silently changes what every policy that mentions
+	// it enforces. If this test fails, the fix is almost always to put the old
+	// ID back rather than to update the expectation.
+	want := []string{
+		"empty-body",
+		"shell-script",
+		"shell-command",
+		"unrelated-url",
+		"description-mismatch",
+	}
+
+	got := IDs(Default())
+
+	if len(got) != len(want) {
+		t.Fatalf("IDs(Default()) = %v, want %v", got, want)
+	}
+	for i, id := range want {
+		if got[i] != id {
+			t.Fatalf("IDs(Default())[%d] = %q, want %q", i, got[i], id)
+		}
+	}
+}
+
+func TestRuleFunc(t *testing.T) {
+	finding := result.Finding{
+		Source:   result.SourceRule,
+		Category: result.Category("test"),
+		Severity: result.SeverityInfo,
+		Message:  "checked",
+	}
+
+	tests := []struct {
+		name         string
+		rule         RuleFunc
+		wantID       string
+		wantFindings int
+	}{
+		{
+			name:         "reports its identifier",
+			rule:         RuleFunc{RuleID: "custom", Checker: func(*skill.Skill) []result.Finding { return []result.Finding{finding} }},
+			wantID:       "custom",
+			wantFindings: 1,
+		},
+		{
+			name:         "a rule with no checker reports nothing",
+			rule:         RuleFunc{RuleID: "empty"},
+			wantID:       "empty",
+			wantFindings: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.rule.ID(); got != tt.wantID {
+				t.Fatalf("ID() = %q, want %q", got, tt.wantID)
+			}
+			if got := tt.rule.Check(&skill.Skill{Name: "n", Description: "d"}); len(got) != tt.wantFindings {
+				t.Fatalf("len(Check()) = %d, want %d", len(got), tt.wantFindings)
+			}
+		})
+	}
+}
+
+func TestShellRulesReportOneProblemOnce(t *testing.T) {
+	tests := []struct {
+		name            string
+		body            string
+		wantScript      int
+		wantCommand     int
+		wantScriptFirst string
+	}{
+		{
+			name:            "a named local script is reported by shell-script only",
+			body:            "Execute the local helper found in ./scripts/racing.sh before answering.",
+			wantScript:      1,
+			wantCommand:     0,
+			wantScriptFirst: "./scripts/racing.sh",
+		},
+		{
+			name:        "a loose shell mention is reported by shell-command only",
+			body:        "Run bash -lc 'ls' to inspect the repo.",
+			wantScript:  0,
+			wantCommand: 1,
+		},
+		{
+			name:        "a body with neither is reported by neither",
+			body:        "Return the words hello world.",
+			wantScript:  0,
+			wantCommand: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := &skill.Skill{Name: "test skill", Description: "desc", Body: tt.body}
+
+			script := shellScriptRule(s)
+			command := shellCommandRule(s)
+
+			if len(script) != tt.wantScript {
+				t.Fatalf("len(shellScriptRule()) = %d, want %d", len(script), tt.wantScript)
+			}
+			if len(command) != tt.wantCommand {
+				t.Fatalf("len(shellCommandRule()) = %d, want %d", len(command), tt.wantCommand)
+			}
+			if tt.wantScriptFirst != "" && script[0].Evidence.Summary != tt.wantScriptFirst {
+				t.Fatalf("shellScriptRule() evidence = %q, want %q", script[0].Evidence.Summary, tt.wantScriptFirst)
 			}
 		})
 	}

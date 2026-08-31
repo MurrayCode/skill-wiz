@@ -77,15 +77,22 @@ Two properties fall out of that shape, and both are deliberate:
 
 ## What it checks
 
-| Check | Category | Severity | Fires when |
-| --- | --- | --- | --- |
-| Required metadata | `metadata` | 🔴 error | `name` or `description` is missing or blank |
-| Shell script execution | `shell` | 🔴 error | the body tells the agent to run a local `./*.sh` |
-| Shell command | `shell` | 🟡 warning | the body mentions a `bash` / `sh` command line |
-| Unrelated URL | `url` | 🟡 warning | a linked domain shares no vocabulary with the skill's stated purpose |
-| Description mismatch | `mismatch` | 🟡 warning | an instruction section shares no meaningful keywords with the description |
-| Empty body | `content` | 🟡 warning | the frontmatter parses but there are no instructions |
-| Model analysis | model-supplied | varies | Gemini flags suspicious, hidden, or contradictory behaviour |
+| Check | Rule ID | Category | Severity | Fires when |
+| --- | --- | --- | --- | --- |
+| Required metadata | — | `metadata` | 🔴 error | `name` or `description` is missing or blank |
+| Shell script execution | `shell-script` | `shell` | 🔴 error | the body tells the agent to run a local `./*.sh` |
+| Shell command | `shell-command` | `shell` | 🟡 warning | the body mentions a `bash` / `sh` command line |
+| Unrelated URL | `unrelated-url` | `url` | 🟡 warning | a linked domain shares no vocabulary with the skill's stated purpose |
+| Description mismatch | `description-mismatch` | `mismatch` | 🟡 warning | an instruction section shares no meaningful keywords with the description |
+| Empty body | `empty-body` | `content` | 🟡 warning | the frontmatter parses but there are no instructions |
+| Model analysis | — | model-supplied | varies | Gemini flags suspicious, hidden, or contradictory behaviour |
+
+Rule IDs are a stable contract — they never change once published. Required metadata comes from
+validation and model analysis from the analyzer, so neither has one.
+
+`shell-script` and `shell-command` describe the same category from different angles, and a body that
+names a local script is reported by `shell-script` alone: the line naming the script almost always
+mentions `bash` or `sh` too, and one problem should be reported once.
 
 Findings from the rules and the model are merged on content, so when both spot the same thing you see it once.
 
