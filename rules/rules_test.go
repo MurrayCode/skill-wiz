@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"sort"
 	"testing"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/murraycode/skill-wiz/result"
@@ -453,6 +454,126 @@ func TestUnrelatedURLRuleOnNonASCIISkills(t *testing.T) {
 
 			if tt.wantFinding && len(got) == 0 {
 				t.Fatalf("unrelatedURLRule() returned no findings, want one")
+			}
+			if !tt.wantFinding && len(got) != 0 {
+				t.Fatalf("unrelatedURLRule() returned %d findings, want 0: %+v", len(got), got)
+			}
+		})
+	}
+}
+
+// TestFoldSets pins the case-fold sets mentionsShellToken hard-codes against the
+// standard library, so a future Unicode table change cannot silently make the
+// prefilter drop matches shellCommandPattern would still accept.
+func TestFoldSets(t *testing.T) {
+	tests := []struct {
+		name string
+		of   rune
+		want []rune
+	}{
+		{name: "s folds to the long s as well as capital S", of: 's', want: []rune{'s', 'ſ', 'S'}},
+		{name: "h folds to capital H only", of: 'h', want: []rune{'h', 'H'}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := []rune{tt.of}
+			for folded := unicode.SimpleFold(tt.of); folded != tt.of; folded = unicode.SimpleFold(folded) {
+				got = append(got, folded)
+			}
+
+			if len(got) != len(tt.want) {
+				t.Fatalf("fold set of %q = %q, want %q", tt.of, got, tt.want)
+			}
+			for i := range tt.want {
+				if got[i] != tt.want[i] {
+					t.Fatalf("fold set of %q = %q, want %q", tt.of, got, tt.want)
+				}
+			}
+		})
+	}
+}
+
+// TestMentionsShellTokenMatchesTheRegexpFolding is the property that matters:
+// the prefilter must never reject a line the regexp would have matched.
+func TestMentionsShellTokenMatchesTheRegexpFolding(t *testing.T) {
+	tests := []struct {
+		name string
+		line string
+	}{
+		{name: "lower case", line: "run bash script.txt"},
+		{name: "upper case", line: "run BASH script.txt"},
+		{name: "mixed case", line: "run Bash script.txt"},
+		{name: "bare sh", line: "use sh -c 'ls'"},
+		{name: "upper case sh", line: "use SH -c 'ls'"},
+		// U+017F folds to "s" under the pattern's (?i), so an ASCII-only
+		// prefilter would drop these two while the regexp still matches them.
+		{name: "long s inside bash", line: "run baſh script.txt"},
+		{name: "long s in sh after a word character", line: "xſh script.txt"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if shellCommandPattern.FindString(tt.line) == "" {
+				t.Fatalf("fixture %q does not match shellCommandPattern; the case is not testing the prefilter", tt.line)
+			}
+			if !mentionsShellToken(tt.line) {
+				t.Fatalf("mentionsShellToken(%q) = false, want true — the prefilter dropped a real match", tt.line)
+			}
+		})
+	}
+}
+
+func TestShellExecutionRuleFindsAFoldedShellMention(t *testing.T) {
+	got := shellExecutionRule(&skill.Skill{
+		Name:        "helper",
+		Description: "a helper skill",
+		Body:        "Please run baſh script.txt to continue.",
+	})
+
+	if len(got) != 1 {
+		t.Fatalf("len(shellExecutionRule()) = %d, want 1", len(got))
+	}
+	if got[0].Evidence.Summary != "baſh script.txt" {
+		t.Fatalf("Evidence.Summary = %q, want %q", got[0].Evidence.Summary, "baſh script.txt")
+	}
+}
+
+// TestIntentTokensKeepsMetadataURLs guards the input semantics of the linear URL
+// strip: extractURLs only ever drew from the body, so only the body's URLs are
+// removed from the skill's stated intent.
+func TestIntentTokensKeepsMetadataURLs(t *testing.T) {
+	tests := []struct {
+		name        string
+		s           *skill.Skill
+		wantFinding bool
+	}{
+		{
+			name: "a url declared in the description vouches for the body link",
+			s: &skill.Skill{
+				Name:        "updates",
+				Description: "Fetches updates from https://quokka.example.net",
+				Body:        "Open https://quokka.example.net/status and report what it says.",
+			},
+			wantFinding: false,
+		},
+		{
+			name: "a body url unrelated to the description is still flagged",
+			s: &skill.Skill{
+				Name:        "updates",
+				Description: "Fetches updates from https://quokka.example.net",
+				Body:        "Open https://motorsport-telemetry.speedwire.io/circuits and report what it says.",
+			},
+			wantFinding: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := unrelatedURLRule(tt.s)
+
+			if tt.wantFinding && len(got) == 0 {
+				t.Fatal("unrelatedURLRule() returned no findings, want one")
 			}
 			if !tt.wantFinding && len(got) != 0 {
 				t.Fatalf("unrelatedURLRule() returned %d findings, want 0: %+v", len(got), got)

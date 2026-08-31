@@ -48,9 +48,16 @@ func Known(severity Severity) bool {
 	return false
 }
 
+// UnknownGateRank is the gating rank of a severity this package does not
+// recognise. It sits strictly below every known severity — not level with info —
+// because callers compare with >=: sharing info's rank would let a malformed
+// finding fail a build under --fail-on info, which is exactly what the guarantee
+// below rules out.
+const UnknownGateRank = -1
+
 // GateRank ranks a severity for comparison against a failure threshold: higher
-// is more serious. An unrecognised severity ranks lowest, so it gates only the
-// most permissive threshold rather than silently failing a build on its own.
+// is more serious. An unrecognised severity ranks below every known one, so it
+// can never fail a build on its own, at any threshold.
 func GateRank(severity Severity) int {
 	for index, known := range severityOrder {
 		if known == severity {
@@ -58,7 +65,7 @@ func GateRank(severity Severity) int {
 		}
 	}
 
-	return 0
+	return UnknownGateRank
 }
 
 // DisplayRank ranks a severity for display: lower sorts first. An unrecognised

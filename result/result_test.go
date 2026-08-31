@@ -202,15 +202,17 @@ func TestGateRankAndDisplayRankDisagreeOnUnknownSeverities(t *testing.T) {
 		{name: "warning", severity: SeverityWarning, wantGateRank: 1, wantDisplayRank: 1},
 		{name: "info", severity: SeverityInfo, wantGateRank: 0, wantDisplayRank: 2},
 		{
-			// Gating must treat an unknown severity as lowest so a malformed
-			// finding cannot fail a build on its own; display must sort it last
-			// so it never outranks a real finding.
-			name:            "unknown severity gates lowest and displays last",
+			// Gating must put an unknown severity below every known one so a
+			// malformed finding cannot fail a build on its own — level with info
+			// is not low enough, because the comparison is >= and info is a
+			// selectable threshold. Display must sort it last so it never
+			// outranks a real finding.
+			name:            "unknown severity gates below info and displays last",
 			severity:        Severity("critical"),
-			wantGateRank:    0,
+			wantGateRank:    UnknownGateRank,
 			wantDisplayRank: 3,
 		},
-		{name: "empty severity gates lowest and displays last", severity: Severity(""), wantGateRank: 0, wantDisplayRank: 3},
+		{name: "empty severity gates below info and displays last", severity: Severity(""), wantGateRank: UnknownGateRank, wantDisplayRank: 3},
 	}
 
 	for _, tt := range tests {
@@ -222,6 +224,17 @@ func TestGateRankAndDisplayRankDisagreeOnUnknownSeverities(t *testing.T) {
 				t.Fatalf("DisplayRank(%q) = %d, want %d", tt.severity, got, tt.wantDisplayRank)
 			}
 		})
+	}
+}
+
+// TestUnknownGateRankIsBelowEverySeverity states the guarantee directly rather
+// than leaving it implied by the table: no threshold a user can select is low
+// enough for an unrecognised severity to fail a build.
+func TestUnknownGateRankIsBelowEverySeverity(t *testing.T) {
+	for _, severity := range Severities() {
+		if UnknownGateRank >= GateRank(severity) {
+			t.Fatalf("UnknownGateRank = %d, want strictly below GateRank(%q) = %d", UnknownGateRank, severity, GateRank(severity))
+		}
 	}
 }
 

@@ -387,3 +387,73 @@ func TestWriteMultipleSkills(t *testing.T) {
 		}
 	}
 }
+
+func TestRenderAnalysisSkipped(t *testing.T) {
+	generatedAt := time.Date(2026, 8, 31, 9, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name     string
+		inputs   []Input
+		wants    []string
+		notWants []string
+	}{
+		{
+			name: "a rules-only scan says the analysis leg was skipped",
+			inputs: []Input{{
+				SkillName:       "racing lookup",
+				SourcePath:      "examples/CLEANSKILL.md",
+				GeneratedAt:     generatedAt,
+				Result:          result.NewCleanResult(),
+				AnalysisSkipped: true,
+			}},
+			wants: []string{"analysis", "skipped", "GEMINI_API_KEY"},
+		},
+		{
+			name: "a complete scan says nothing about a skipped leg",
+			inputs: []Input{{
+				SkillName:   "racing lookup",
+				SourcePath:  "examples/CLEANSKILL.md",
+				GeneratedAt: generatedAt,
+				Result:      result.NewCleanResult(),
+			}},
+			notWants: []string{"skipped", "GEMINI_API_KEY"},
+		},
+		{
+			name: "the row is per skill, so a flagged rules-only scan carries it too",
+			inputs: []Input{{
+				SkillName:   "hidden bash",
+				SourcePath:  "examples/HIDDENBASHSKILL.md",
+				GeneratedAt: generatedAt,
+				Result: result.NewResult(result.Finding{
+					Source:   result.SourceRule,
+					Category: result.Category("shell"),
+					Severity: result.SeverityError,
+					Message:  "skill references local shell script execution",
+					Evidence: result.Evidence{Summary: "./scripts/racing.sh"},
+				}),
+				AnalysisSkipped: true,
+			}},
+			wants: []string{"skipped", "GEMINI_API_KEY", "./scripts/racing.sh"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := Render(tt.inputs...)
+			if err != nil {
+				t.Fatalf("Render() error = %v, want nil", err)
+			}
+
+			for _, want := range tt.wants {
+				if !strings.Contains(got, want) {
+					t.Fatalf("Render() is missing %q", want)
+				}
+			}
+			for _, notWant := range tt.notWants {
+				if strings.Contains(got, notWant) {
+					t.Fatalf("Render() contains %q, want no mention of it", notWant)
+				}
+			}
+		})
+	}
+}

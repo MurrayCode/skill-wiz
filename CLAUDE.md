@@ -103,8 +103,8 @@ Data flows one way, and every layer returns findings rather than printing:
   JavaScript a reader still sees every skill rather than one panel and a dead control — keep that
   order if you touch the script.
 - **One severity vocabulary.** `result` owns the ordering (`result.Severities`) and both rankings
-  derived from it: `result.GateRank` for the exit-code threshold (unknown ranks lowest, so a
-  malformed finding fails nothing on its own) and `result.DisplayRank` for console and report order
+  derived from it: `result.GateRank` for the exit-code threshold (unknown ranks below every known
+  severity, so a malformed finding fails nothing on its own at any threshold) and `result.DisplayRank` for console and report order
   (unknown sorts last, so it never outranks a real finding). The two disagree about the unknown case
   deliberately — do not collapse them. `result.FormatSources` and `result.Pluralize` live there for
   the same reason: `main` and `report` both need them and `result` is the leaf package. No package
@@ -125,8 +125,9 @@ Data flows one way, and every layer returns findings rather than printing:
   read, parse, scan), `2` at least one finding at or above the active threshold. `exitCode` maps a
   finished run onto that, and an operational failure outranks findings — a run with both exits `1`.
   `--fail-on` (`error` by default, also `warning` or `info`) sets the threshold via `parseSeverity`
-  and `result.GateRank`; an unrecognised severity ranks lowest so it can never fail a build on its
-  own.
+  and `result.GateRank`; an unrecognised severity ranks at `result.UnknownGateRank`, *strictly below*
+  every known severity, so it can never fail a build on its own — level with `info` would not be low
+  enough, because the comparison is `>=` and `info` is a selectable threshold.
   Both the text and JSON branches return the same code. Don't renumber `1`.
 - **The scanner degrades rather than fails.** If the analyzer errors but rules already found
   something, `Scan` returns the rule findings and swallows the error; it propagates the error only
@@ -149,6 +150,14 @@ Data flows one way, and every layer returns findings rather than printing:
   finding missing any field all become a `warning` "Analyzer returned unusable response" finding
   rather than a clean result (`analyse/analyse.go:120`). Preserve this: a broken model response must
   never read as "clean".
+- **The shell prefilter must fold exactly as the regexp does.** `mentionsShellToken` gates
+  `shellCommandPattern` per line and is only sound because it accepts everything `(?i)` would.
+  That is *Unicode* simple folding, not ASCII: `s` folds to `{s, S, ſ}`, so `baſh script.txt` is a
+  real match. `TestFoldSets` pins both fold sets against `unicode.SimpleFold`.
+- **`intentTokens` strips URLs from the body only.** The rule asks whether a body link shares
+  vocabulary with the skill's stated intent, and a URL the name or description declares *is* part of
+  that intent — only the body's own links are removed, so a link cannot vouch for itself. Stripping
+  the joined string instead would newly flag body URLs that a metadata URL used to vouch for.
 - The rule heuristics are keyword/token based and were tuned against the fixtures in `examples/`.
   Changing tokenisation (`tokenSet`, `keywords`, `ignoredToken`, `weakMismatchOverlap`) will move
   fixture results — re-run `go test ./rules/...`. Tokenisation must also stay **rune-safe**: iterate

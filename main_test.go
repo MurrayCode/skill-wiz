@@ -426,6 +426,20 @@ func TestExitCode(t *testing.T) {
 			want:      exitFindings,
 		},
 		{
+			// A malformed severity must not fail a build at any threshold, so
+			// even the most permissive one leaves it alone.
+			name:      "an unknown severity does not gate even fail-on info",
+			scans:     []fileScan{flagged(result.Severity("critical"))},
+			threshold: result.SeverityInfo,
+			want:      exitClean,
+		},
+		{
+			name:      "an unknown severity alongside a real finding still gates on the real one",
+			scans:     []fileScan{flagged(result.Severity("critical")), flagged(result.SeverityError)},
+			threshold: result.SeverityError,
+			want:      exitFindings,
+		},
+		{
 			name:      "operational failure outranks findings",
 			scans:     []fileScan{flagged(result.SeverityError)},
 			failed:    true,
@@ -1357,19 +1371,60 @@ func TestRunWithAPIKeyIsUnchanged(t *testing.T) {
 	}
 }
 
-// staggeredAnalyzer delays each skill by a per-name duration so that the order
-// scans complete differs from the order their files were given, and records the
-// order in which it was entered.
-func staggeredAnalyzer(delays map[string]time.Duration, entered *[]string, mu *sync.Mutex) scanner.Analyzer {
-	return scanner.AnalyzerFunc(func(s *skill.Skill) (result.Result, error) {
-		mu.Lock()
-		*entered = append(*entered, s.Name)
-		mu.Unlock()
+// scanRecorder observes a run through the analyzer seam. It delays each skill by
+// a per-name duration so completion order can differ from file order, and
+// records enough to tell a concurrent run from a sequential one: which skills
+// were entered, which finished and in what order, and how many were ever in
+// flight at once.
+type scanRecorder struct {
+	delays map[string]time.Duration
 
-		time.Sleep(delays[s.Name])
+	mu          sync.Mutex
+	entered     []string
+	completed   []string
+	inFlight    int
+	maxInFlight int
+}
+
+func (r *scanRecorder) analyzer() scanner.Analyzer {
+	return scanner.AnalyzerFunc(func(s *skill.Skill) (result.Result, error) {
+		r.mu.Lock()
+		r.entered = append(r.entered, s.Name)
+		r.inFlight++
+		if r.inFlight > r.maxInFlight {
+			r.maxInFlight = r.inFlight
+		}
+		r.mu.Unlock()
+
+		time.Sleep(r.delays[s.Name])
+
+		r.mu.Lock()
+		r.inFlight--
+		r.completed = append(r.completed, s.Name)
+		r.mu.Unlock()
 
 		return result.NewCleanResult(), nil
 	})
+}
+
+func (r *scanRecorder) snapshot() (entered []string, completed []string, maxInFlight int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return append([]string{}, r.entered...), append([]string{}, r.completed...), r.maxInFlight
+}
+
+func equalOrder(got []string, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+
+	return true
 }
 
 func TestRunScansConcurrentlyAndRendersInFileOrder(t *testing.T) {
@@ -1381,23 +1436,30 @@ func TestRunScansConcurrentlyAndRendersInFileOrder(t *testing.T) {
 		"delta": 0,
 	}
 
+	// File order is alpha, bravo, delta; the delays make completion order the
+	// exact reverse, so rendering by completion rather than by index is visible.
+	fileOrder := []string{"alpha", "bravo", "delta"}
+	completionOrder := []string{"delta", "bravo", "alpha"}
+
 	tests := []struct {
-		name        string
-		flags       []string
-		wantEntered []string
+		name           string
+		flags          []string
+		wantConcurrent bool
 	}{
 		{
-			name:  "default concurrency",
-			flags: nil,
+			name:           "default concurrency",
+			flags:          nil,
+			wantConcurrent: true,
 		},
 		{
-			name:        "concurrency 1 scans sequentially",
-			flags:       []string{"--concurrency", "1"},
-			wantEntered: []string{"alpha", "bravo", "delta"},
+			name:           "concurrency 1 scans sequentially",
+			flags:          []string{"--concurrency", "1"},
+			wantConcurrent: false,
 		},
 		{
-			name:  "concurrency above the file count",
-			flags: []string{"--concurrency", "16"},
+			name:           "concurrency above the file count",
+			flags:          []string{"--concurrency", "16"},
+			wantConcurrent: true,
 		},
 	}
 
@@ -1422,11 +1484,10 @@ func TestRunScansConcurrentlyAndRendersInFileOrder(t *testing.T) {
 			reportPath = func() (string, error) {
 				return filepath.Join(reportDirectory, "skill-wiz-report.html"), nil
 			}
-			var mu sync.Mutex
-			var entered []string
+			recorder := &scanRecorder{delays: delays}
 			originalAnalyzer := newSkillAnalyzer
 			newSkillAnalyzer = func(analyse.Config) scanner.Analyzer {
-				return staggeredAnalyzer(delays, &entered, &mu)
+				return recorder.analyzer()
 			}
 			defer func() {
 				reportPath = originalReportPath
@@ -1452,18 +1513,31 @@ func TestRunScansConcurrentlyAndRendersInFileOrder(t *testing.T) {
 				previous = index
 			}
 
-			if tt.wantEntered != nil {
-				mu.Lock()
-				got := append([]string{}, entered...)
-				mu.Unlock()
-				if len(got) != len(tt.wantEntered) {
-					t.Fatalf("scan order = %v, want %v", got, tt.wantEntered)
+			entered, completed, maxInFlight := recorder.snapshot()
+
+			if tt.wantConcurrent {
+				// Without these two the test would still pass if scanFiles
+				// regressed to a sequential loop: the delays alone prove nothing.
+				if maxInFlight < 2 {
+					t.Fatalf("peak scans in flight = %d, want at least 2 — the run was sequential", maxInFlight)
 				}
-				for i := range got {
-					if got[i] != tt.wantEntered[i] {
-						t.Fatalf("scan order = %v, want %v", got, tt.wantEntered)
-					}
+				if !equalOrder(completed, completionOrder) {
+					t.Fatalf("completion order = %v, want %v", completed, completionOrder)
 				}
+				if equalOrder(completed, fileOrder) {
+					t.Fatalf("completion order = %v, which matches file order — the test proves nothing about ordering", completed)
+				}
+				return
+			}
+
+			if maxInFlight != 1 {
+				t.Fatalf("peak scans in flight = %d, want 1 under --concurrency 1", maxInFlight)
+			}
+			if !equalOrder(entered, fileOrder) {
+				t.Fatalf("scan order = %v, want %v", entered, fileOrder)
+			}
+			if !equalOrder(completed, fileOrder) {
+				t.Fatalf("completion order = %v, want %v", completed, fileOrder)
 			}
 		})
 	}
@@ -1498,11 +1572,13 @@ func TestRunReportsConcurrentFailuresInFileOrder(t *testing.T) {
 	reportPath = func() (string, error) {
 		return filepath.Join(reportDirectory, "skill-wiz-report.html"), nil
 	}
-	var mu sync.Mutex
-	var entered []string
+	// The one file that parses is also the slow one, so both failures are known
+	// long before it finishes: nothing but the file-ordered drain keeps them in
+	// order on stderr.
+	recorder := &scanRecorder{delays: map[string]time.Duration{"bravo": 40 * time.Millisecond}}
 	originalAnalyzer := newSkillAnalyzer
 	newSkillAnalyzer = func(analyse.Config) scanner.Analyzer {
-		return staggeredAnalyzer(map[string]time.Duration{"bravo": 40 * time.Millisecond}, &entered, &mu)
+		return recorder.analyzer()
 	}
 	defer func() {
 		reportPath = originalReportPath
