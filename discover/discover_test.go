@@ -159,3 +159,90 @@ func writeFile(t *testing.T, path string) {
 		t.Fatalf("os.WriteFile() error = %v", err)
 	}
 }
+
+// TestFilesCollapsesEquivalentSpellings joins its paths by concatenation rather
+// than filepath.Join, because Join cleans the result and would hide the very
+// spellings this test is about.
+func TestFilesCollapsesEquivalentSpellings(t *testing.T) {
+	tests := []struct {
+		name   string
+		layout []string
+		paths  []string
+		want   []string
+	}{
+		{
+			name:   "dot segment spelling collapses",
+			layout: []string{"skills/alpha.md"},
+			paths:  []string{"skills/alpha.md", "skills/./alpha.md"},
+			want:   []string{"skills/alpha.md"},
+		},
+		{
+			name:   "doubled separator spelling collapses",
+			layout: []string{"skills/alpha.md"},
+			paths:  []string{"skills/alpha.md", "skills//alpha.md"},
+			want:   []string{"skills/alpha.md"},
+		},
+		{
+			name:   "parent traversal spelling collapses",
+			layout: []string{"skills/alpha.md", "skills/nested/beta.md"},
+			paths:  []string{"skills/alpha.md", "skills/nested/../alpha.md"},
+			want:   []string{"skills/alpha.md"},
+		},
+		{
+			name:   "trailing slash directory collapses against the same directory",
+			layout: []string{"skills/alpha.md"},
+			paths:  []string{"skills/", "skills"},
+			want:   []string{"skills/alpha.md"},
+		},
+		{
+			name:   "explicit file collapses against its parent directory",
+			layout: []string{"skills/alpha.md", "skills/beta.md"},
+			paths:  []string{"skills/./alpha.md", "skills"},
+			want:   []string{"skills/./alpha.md", "skills/beta.md"},
+		},
+		{
+			name:   "first spelling is the one retained",
+			layout: []string{"skills/alpha.md"},
+			paths:  []string{"skills/./alpha.md", "skills/alpha.md"},
+			want:   []string{"skills/./alpha.md"},
+		},
+		{
+			name:   "genuinely different files are never collapsed",
+			layout: []string{"skills/alpha.md", "skills/beta.md"},
+			paths:  []string{"skills/alpha.md", "skills/./beta.md"},
+			want:   []string{"skills/alpha.md", "skills/./beta.md"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			for _, relative := range tt.layout {
+				writeFile(t, filepath.Join(root, filepath.FromSlash(relative)))
+			}
+
+			paths := make([]string, 0, len(tt.paths))
+			for _, relative := range tt.paths {
+				paths = append(paths, root+string(filepath.Separator)+filepath.FromSlash(relative))
+			}
+
+			got, err := Files(paths)
+			if err != nil {
+				t.Fatalf("Files() error = %v, want nil", err)
+			}
+
+			want := make([]string, 0, len(tt.want))
+			for _, relative := range tt.want {
+				want = append(want, root+string(filepath.Separator)+filepath.FromSlash(relative))
+			}
+			if len(got) != len(want) {
+				t.Fatalf("Files() = %v, want %v", got, want)
+			}
+			for i := range want {
+				if got[i] != want[i] {
+					t.Fatalf("Files()[%d] = %q, want %q", i, got[i], want[i])
+				}
+			}
+		})
+	}
+}
