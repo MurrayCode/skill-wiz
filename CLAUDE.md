@@ -38,8 +38,9 @@ Data flows one way, and every layer returns findings rather than printing:
 
 - **`result`** is the leaf package and the common currency. `Finding` carries `Source`
   (`validation` | `rule` | `analyzer`), `Category`, `Severity`, `Message`, `Evidence`; `Result` wraps
-  `[]Finding` with `Clean()`. Nothing here knows about skills, rules, or the LLM — add new producers,
-  not new coupling.
+  `[]Finding` with `Clean()`. It also owns the shared severity vocabulary — `Severities`, `Known`,
+  `GateRank`, `DisplayRank` — plus `FormatSources` and `Pluralize`. Nothing here knows about skills,
+  rules, or the LLM — add new producers, not new coupling.
 - **`skill`** parses and validates only. `Parse` normalises CRLF and accepts both a `\n---\n` closing
   fence and a trailing `\n---` at EOF. `Validate` returns `ValidationErrors` (a slice of field-level
   `ValidationError`), which `main` unpacks into one finding per missing field.
@@ -94,8 +95,15 @@ Data flows one way, and every layer returns findings rather than printing:
   `<select>` is `hidden`; the inline script unhides the picker and hides the other sections. Without
   JavaScript a reader still sees every skill rather than one panel and a dead control — keep that
   order if you touch the script.
+- **One severity vocabulary.** `result` owns the ordering (`result.Severities`) and both rankings
+  derived from it: `result.GateRank` for the exit-code threshold (unknown ranks lowest, so a
+  malformed finding fails nothing on its own) and `result.DisplayRank` for console and report order
+  (unknown sorts last, so it never outranks a real finding). The two disagree about the unknown case
+  deliberately — do not collapse them. `result.FormatSources` and `result.Pluralize` live there for
+  the same reason: `main` and `report` both need them and `result` is the leaf package. No package
+  should grow a severity table of its own.
 - **Presentation lives at render time only.** `renderResult` sorts a *copy* of the findings by
-  `renderRank` (error → warning → info, unknown last) and truncates evidence past
+  `result.DisplayRank` (error → warning → info, unknown last) and truncates evidence past
   `maxEvidenceRunes`; `result.Result` keeps its merge order and the JSON and HTML paths keep the
   full text. Sorting is stable, so rule findings stay ahead of analyzer findings within a severity.
 - **Colour is a value, not a lookup.** `main` decides with `isTerminal(os.Stdout)` and passes it
@@ -110,7 +118,8 @@ Data flows one way, and every layer returns findings rather than printing:
   read, parse, scan), `2` at least one finding at or above the active threshold. `exitCode` maps a
   finished run onto that, and an operational failure outranks findings — a run with both exits `1`.
   `--fail-on` (`error` by default, also `warning` or `info`) sets the threshold via `parseSeverity`
-  and `severityRank`; an unrecognised severity ranks lowest so it can never fail a build on its own.
+  and `result.GateRank`; an unrecognised severity ranks lowest so it can never fail a build on its
+  own.
   Both the text and JSON branches return the same code. Don't renumber `1`.
 - **The scanner degrades rather than fails.** If the analyzer errors but rules already found
   something, `Scan` returns the rule findings and swallows the error; it propagates the error only

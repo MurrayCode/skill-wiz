@@ -110,14 +110,6 @@ type findingView struct {
 	Evidence string
 }
 
-// severityOrder ranks severities from most to least serious; unknown
-// severities sort last so a malformed finding never outranks a real one.
-var severityOrder = map[result.Severity]int{
-	result.SeverityError:   0,
-	result.SeverityWarning: 1,
-	result.SeverityInfo:    2,
-}
-
 func newPageView(inputs []Input) pageView {
 	labels := pickerLabels(inputs)
 
@@ -173,7 +165,7 @@ func tally(count int) string {
 		return "no findings"
 	}
 
-	return fmt.Sprintf("%d %s", count, pluralise(count))
+	return result.Pluralize(count, "finding")
 }
 
 func newSkillView(input Input) skillView {
@@ -184,7 +176,7 @@ func newSkillView(input Input) skillView {
 		SkillDescription: strings.TrimSpace(input.SkillDescription),
 		SourcePath:       input.SourcePath,
 		GeneratedAt:      timestamp(input.GeneratedAt),
-		Sources:          formatSources(input.Result.Sources()),
+		Sources:          result.FormatSources(input.Result.Sources()),
 		AnalysisSkipped:  input.AnalysisSkipped,
 		Counts:           severityCounts(findings),
 		Findings:         make([]findingView, 0, len(findings)),
@@ -212,7 +204,7 @@ func verdict(findings []result.Finding) (headline string, detail string, tone st
 			"clean"
 	}
 
-	headline = fmt.Sprintf("%d %s", len(findings), pluralise(len(findings)))
+	headline = result.Pluralize(len(findings), "finding")
 	tone = string(findings[0].Severity)
 	switch findings[0].Severity {
 	case result.SeverityError:
@@ -233,7 +225,7 @@ func severityCounts(findings []result.Finding) []countView {
 		counts[finding.Severity]++
 	}
 
-	ordered := []result.Severity{result.SeverityError, result.SeverityWarning, result.SeverityInfo}
+	ordered := result.Severities()
 	views := make([]countView, 0, len(ordered))
 	for _, severity := range ordered {
 		if counts[severity] == 0 {
@@ -255,19 +247,10 @@ func sortedFindings(findings []result.Finding) []result.Finding {
 	sorted := make([]result.Finding, len(findings))
 	copy(sorted, findings)
 	sort.SliceStable(sorted, func(i, j int) bool {
-		return severityRank(sorted[i].Severity) < severityRank(sorted[j].Severity)
+		return result.DisplayRank(sorted[i].Severity) < result.DisplayRank(sorted[j].Severity)
 	})
 
 	return sorted
-}
-
-func severityRank(severity result.Severity) int {
-	rank, ok := severityOrder[severity]
-	if !ok {
-		return len(severityOrder)
-	}
-
-	return rank
 }
 
 func skillTitle(input Input) string {
@@ -287,33 +270,4 @@ func timestamp(generatedAt time.Time) string {
 	}
 
 	return generatedAt.Format(timestampLayout)
-}
-
-func formatSources(sources []result.Source) string {
-	parts := make([]string, 0, len(sources))
-	for _, source := range sources {
-		if source == "" {
-			continue
-		}
-		parts = append(parts, string(source))
-	}
-
-	switch len(parts) {
-	case 0:
-		return ""
-	case 1:
-		return parts[0]
-	case 2:
-		return parts[0] + " and " + parts[1]
-	default:
-		return strings.Join(parts[:len(parts)-1], ", ") + ", and " + parts[len(parts)-1]
-	}
-}
-
-func pluralise(count int) string {
-	if count == 1 {
-		return "finding"
-	}
-
-	return "findings"
 }

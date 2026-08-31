@@ -62,15 +62,6 @@ var severityColor = map[result.Severity]string{
 	result.SeverityInfo:    colorInfo,
 }
 
-// severityRank orders severities so that a threshold can be compared against a
-// finding. An unrecognised severity ranks lowest, so it gates only the most
-// permissive threshold rather than silently failing a build.
-var severityRank = map[result.Severity]int{
-	result.SeverityInfo:    0,
-	result.SeverityWarning: 1,
-	result.SeverityError:   2,
-}
-
 // renderStyle carries the presentation decisions taken in main. run writes to
 // an io.Writer, so whether stdout is a terminal has to arrive as a value rather
 // than be sniffed from inside the render path.
@@ -215,7 +206,7 @@ func exitCode(scans []fileScan, failed bool, threshold result.Severity) int {
 
 	for _, scan := range scans {
 		for _, finding := range scan.result.Findings {
-			if severityRank[finding.Severity] >= severityRank[threshold] {
+			if result.GateRank(finding.Severity) >= result.GateRank(threshold) {
 				return exitFindings
 			}
 		}
@@ -372,7 +363,7 @@ func parseOptions(args []string, stderr io.Writer) (options, error) {
 // code, rejecting anything outside the known severities.
 func parseSeverity(value string) (result.Severity, error) {
 	severity := result.Severity(strings.ToLower(strings.TrimSpace(value)))
-	if _, ok := severityRank[severity]; !ok {
+	if !result.Known(severity) {
 		return "", fmt.Errorf("invalid -fail-on %q: must be one of error, warning, info", strings.TrimSpace(value))
 	}
 
@@ -593,7 +584,7 @@ func renderTally(scans []fileScan) string {
 	}
 
 	tally := fmt.Sprintf("%s scanned · %d clean · %d flagged · %s",
-		pluralize(len(scans), "file"), clean, flagged, pluralize(findings, "finding"))
+		result.Pluralize(len(scans), "file"), clean, flagged, result.Pluralize(findings, "finding"))
 	if breakdown := severityBreakdown(counts); breakdown != "" {
 		tally += " (" + breakdown + ")"
 	}
@@ -606,21 +597,13 @@ func renderTally(scans []fileScan) string {
 // no bucket to sit in.
 func severityBreakdown(counts map[result.Severity]int) string {
 	parts := make([]string, 0, 3)
-	for _, severity := range []result.Severity{result.SeverityError, result.SeverityWarning, result.SeverityInfo} {
+	for _, severity := range result.Severities() {
 		if count := counts[severity]; count > 0 {
 			parts = append(parts, fmt.Sprintf("%d %s", count, severity))
 		}
 	}
 
 	return strings.Join(parts, ", ")
-}
-
-func pluralize(count int, noun string) string {
-	if count == 1 {
-		return fmt.Sprintf("%d %s", count, noun)
-	}
-
-	return fmt.Sprintf("%d %ss", count, noun)
 }
 
 func renderResult(scanResult result.Result, style renderStyle) string {
@@ -631,7 +614,7 @@ func renderResult(scanResult result.Result, style renderStyle) string {
 	var builder strings.Builder
 	fmt.Fprintf(&builder, "Scan flagged %d finding(s)", len(scanResult.Findings))
 	if sources := scanResult.Sources(); len(sources) > 0 {
-		fmt.Fprintf(&builder, " from %s checks", formatSources(sources))
+		fmt.Fprintf(&builder, " from %s checks", result.FormatSources(sources))
 	}
 	builder.WriteString("\n")
 	for _, finding := range orderedFindings(scanResult.Findings) {
@@ -652,22 +635,10 @@ func orderedFindings(findings []result.Finding) []result.Finding {
 	ordered := make([]result.Finding, len(findings))
 	copy(ordered, findings)
 	sort.SliceStable(ordered, func(i, j int) bool {
-		return renderRank(ordered[i].Severity) > renderRank(ordered[j].Severity)
+		return result.DisplayRank(ordered[i].Severity) < result.DisplayRank(ordered[j].Severity)
 	})
 
 	return ordered
-}
-
-// renderRank orders a severity for display. It is deliberately separate from
-// severityRank: an unrecognised severity gates nothing, and prints last rather
-// than sharing a rank with info.
-func renderRank(severity result.Severity) int {
-	rank, ok := severityRank[severity]
-	if !ok {
-		return -1
-	}
-
-	return rank
 }
 
 func severityLabel(severity result.Severity, style renderStyle) string {
@@ -693,24 +664,6 @@ func truncateEvidence(summary string) string {
 	}
 
 	return string(runes[:maxEvidenceRunes]) + "…"
-}
-
-func formatSources(sources []result.Source) string {
-	parts := make([]string, 0, len(sources))
-	for _, source := range sources {
-		parts = append(parts, string(source))
-	}
-
-	switch len(parts) {
-	case 0:
-		return ""
-	case 1:
-		return parts[0]
-	case 2:
-		return parts[0] + " and " + parts[1]
-	default:
-		return strings.Join(parts[:len(parts)-1], ", ") + ", and " + parts[len(parts)-1]
-	}
 }
 
 func analyseCleanMessage() string {
