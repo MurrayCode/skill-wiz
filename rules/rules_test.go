@@ -278,3 +278,78 @@ func mustParseSkillFile(t *testing.T, path string) *skill.Skill {
 
 	return parsed
 }
+
+func TestShellExecutionRuleReachesRegexWhateverTheCase(t *testing.T) {
+	tests := []struct {
+		name         string
+		body         string
+		wantFinding  bool
+		wantEvidence string
+	}{
+		{
+			name:         "lower case bash",
+			body:         "Please bash script.txt to continue.",
+			wantFinding:  true,
+			wantEvidence: "bash script.txt",
+		},
+		{
+			name:         "upper case bash",
+			body:         "Please BASH script.txt to continue.",
+			wantFinding:  true,
+			wantEvidence: "BASH script.txt",
+		},
+		{
+			name:         "mixed case sh",
+			body:         "Please Sh script.txt to continue.",
+			wantFinding:  true,
+			wantEvidence: "Sh script.txt",
+		},
+		{
+			name:        "no shell reference",
+			body:        "Summarise the published results for the reader.",
+			wantFinding: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := shellExecutionRule(&skill.Skill{Name: "n", Description: "d", Body: tt.body})
+
+			if !tt.wantFinding {
+				if len(got) != 0 {
+					t.Fatalf("shellExecutionRule() returned %d findings, want 0", len(got))
+				}
+				return
+			}
+
+			if len(got) != 1 {
+				t.Fatalf("len(shellExecutionRule()) = %d, want 1", len(got))
+			}
+			if got[0].Evidence.Summary != tt.wantEvidence {
+				t.Fatalf("Evidence.Summary = %q, want %q", got[0].Evidence.Summary, tt.wantEvidence)
+			}
+		})
+	}
+}
+
+func TestMentionsShellTokenNeverFiltersOutARealMatch(t *testing.T) {
+	tests := []string{
+		"run bash",
+		"run BASH",
+		"run Bash",
+		"use sh -c 'ls'",
+		"use SH",
+		"use Sh",
+	}
+
+	for _, line := range tests {
+		t.Run(line, func(t *testing.T) {
+			if shellCommandPattern.FindString(line) == "" {
+				t.Fatalf("fixture %q does not match shellCommandPattern; the case is not testing the prefilter", line)
+			}
+			if !mentionsShellToken(line) {
+				t.Fatalf("mentionsShellToken(%q) = false, want true", line)
+			}
+		})
+	}
+}

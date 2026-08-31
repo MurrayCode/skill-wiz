@@ -78,7 +78,7 @@ func descriptionMismatchRule(s *skill.Skill) []result.Finding {
 	segments := bodySegments(s.Body)
 	hasMatchingSection := false
 	for _, segment := range segments {
-		segmentKeywords := keywords(segment)
+		segmentKeywords := keywordTokens(segment)
 		if len(segmentKeywords) < 4 {
 			continue
 		}
@@ -109,7 +109,12 @@ func descriptionMismatchRule(s *skill.Skill) []result.Finding {
 }
 
 func keywords(text string) map[string]struct{} {
-	text = urlPattern.ReplaceAllString(text, " ")
+	return keywordTokens(urlPattern.ReplaceAllString(text, " "))
+}
+
+// keywordTokens is the tokenising half of keywords, for callers whose text has
+// already had its URLs stripped.
+func keywordTokens(text string) map[string]struct{} {
 	tokens := strings.FieldsFunc(strings.ToLower(text), func(r rune) bool {
 		return !unicode.IsLetter(r) && !unicode.IsNumber(r)
 	})
@@ -178,7 +183,7 @@ func unrelatedURLRule(s *skill.Skill) []result.Finding {
 		return nil
 	}
 
-	intentTokens := intentTokens(s, urls)
+	intentTokens := intentTokens(s)
 	if len(intentTokens) == 0 {
 		return nil
 	}
@@ -225,13 +230,10 @@ func extractURLs(text string) []string {
 	return urls
 }
 
-func intentTokens(s *skill.Skill, urls []string) map[string]struct{} {
+func intentTokens(s *skill.Skill) map[string]struct{} {
 	text := strings.Join([]string{s.Name, s.Description, s.Body}, " ")
-	for _, rawURL := range urls {
-		text = strings.ReplaceAll(text, rawURL, " ")
-	}
 
-	return tokenSet(text)
+	return tokenSet(urlPattern.ReplaceAllString(text, " "))
 }
 
 func urlTokens(parsed *url.URL) map[string]struct{} {
@@ -270,6 +272,10 @@ func shellExecutionRule(s *skill.Skill) []result.Finding {
 	}
 
 	for _, line := range strings.Split(body, "\n") {
+		if !mentionsShellToken(line) {
+			continue
+		}
+
 		trimmed := strings.TrimSpace(line)
 		if benignShellMention(trimmed) {
 			continue
@@ -287,6 +293,20 @@ func shellExecutionRule(s *skill.Skill) []result.Finding {
 	}
 
 	return nil
+}
+
+// mentionsShellToken is a necessary condition for shellCommandPattern to match:
+// every alternative it accepts contains "sh". The check is ASCII case-folded and
+// allocation-free so that lines with no shell reference never reach the regexp
+// engine, and never reach benignShellMention's lowercased copy either.
+func mentionsShellToken(line string) bool {
+	for i := 0; i+1 < len(line); i++ {
+		if (line[i] == 's' || line[i] == 'S') && (line[i+1] == 'h' || line[i+1] == 'H') {
+			return true
+		}
+	}
+
+	return false
 }
 
 func benignShellMention(line string) bool {
