@@ -139,6 +139,7 @@ skill-wiz ~/.claude/skills ./team-skills              # directories and files to
 | `--timeout` | `1m` | Maximum time to wait for the analysis leg |
 | `--fail-on` | `error` | Lowest finding severity that fails the run: `error`, `warning`, or `info` |
 | `--concurrency` | `8` | How many files to scan at once |
+| `--policy` | — | Path to a policy file; defaults to `.skill-wiz.yaml` in the working directory |
 
 One unreadable or unparseable file never hides the rest: it is reported on stderr and the run
 carries on. However many files a run covers, it writes one HTML report.
@@ -151,6 +152,41 @@ Concurrency changes nothing you can see: results, the report, the JSON array, th
 stderr failure messages all stay in file order however the workers finished, so the output of a
 concurrent run is byte-identical to a sequential one. **`--timeout` remains per request** — it bounds
 each analysis call, not the run as a whole.
+
+### Policy
+
+A run can be configured with a policy file. There is no policy by default, and a run without one
+behaves exactly as it always has.
+
+```yaml
+# .skill-wiz.yaml
+rules:
+  shell-command:
+    enabled: false
+require:
+  - shell-script
+  - description-mismatch
+```
+
+| Key | Meaning |
+| --- | --- |
+| `rules.<id>.enabled` | `false` skips that rule entirely; `true` is the default and states it explicitly |
+| `require` | rule IDs the policy insists on — loading fails if one is missing from the active rule set, or if the same policy disables it |
+
+Rules are named by their **rule ID**, from the table in [What it checks](#what-it-checks) — not by
+category, since one category can come from several rules and moving them together is rarely what
+anyone means.
+
+**Discovery is explicit.** `--policy <path>` wins, and naming a file that does not exist fails the
+run. With no flag, `.skill-wiz.yaml` in the working directory is used if it is there. There is no
+upward search, no home directory, and no environment variable: a scanner whose verdict depends on
+where it was run from is hard to trust.
+
+**A bad policy stops the run.** An unreadable file, YAML that does not parse, a misspelled key, a
+rule ID that does not exist, or a `require` entry the policy itself disables all exit `1` with the
+policy path in the message. None of them is a finding — the scan never starts. `require` exists so
+that a rule renamed or removed by a refactor fails loudly instead of quietly no longer being
+enforced.
 
 ### Exit codes
 
@@ -300,6 +336,7 @@ The rule heuristics are keyword-based and tuned against those three — retune o
 ```text
 main.go     flag parsing, wiring, orchestration, JSON
 discover/   expands CLI paths into the skill files to scan
+policy/     loads .skill-wiz.yaml and decides which rules a run enforces
 skill/      frontmatter parsing and validation
 rules/      deterministic checks
 analyse/    Gemini client and prompt hardening

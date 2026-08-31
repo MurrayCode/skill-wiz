@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/murraycode/skill-wiz/analyse"
+	"github.com/murraycode/skill-wiz/policy"
 	"github.com/murraycode/skill-wiz/result"
 	"github.com/murraycode/skill-wiz/rules"
 	"github.com/murraycode/skill-wiz/scanner"
@@ -99,6 +100,18 @@ func TestParseOptions(t *testing.T) {
 				timeout:     analyse.DefaultTimeout,
 				failOn:      result.SeverityError,
 				concurrency: 3,
+			},
+		},
+		{
+			name: "policy path is parsed and trimmed",
+			args: []string{"--policy", " ./team.yaml ", "skill.md"},
+			want: options{
+				paths:       []string{"skill.md"},
+				model:       analyse.DefaultModel,
+				timeout:     analyse.DefaultTimeout,
+				failOn:      result.SeverityError,
+				concurrency: defaultConcurrency,
+				policy:      "./team.yaml",
 			},
 		},
 		{
@@ -474,7 +487,19 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 
-	os.Exit(m.Run())
+	// Policy discovery must not depend on whether the repository happens to
+	// hold a .skill-wiz.yaml. Point it at an empty directory for the whole
+	// package; the tests that care about discovery override it themselves.
+	directory, err := os.MkdirTemp("", "skill-wiz-policy")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "create policy discovery directory: %v\n", err)
+		os.Exit(1)
+	}
+	policyDirectory = func() (string, error) { return directory, nil }
+
+	code := m.Run()
+	os.RemoveAll(directory)
+	os.Exit(code)
 }
 
 func TestRun(t *testing.T) {
@@ -1625,6 +1650,203 @@ func TestRunRejectsInvalidConcurrency(t *testing.T) {
 			}
 			if got := strings.Count(stderr.String(), "invalid -concurrency"); got != 1 {
 				t.Fatalf("stderr reported the error %d times, want 1: %q", got, stderr.String())
+			}
+		})
+	}
+}
+
+func TestRunWithPolicy(t *testing.T) {
+	const hiddenBashSkill = "examples/HIDDENBASHSKILL.md"
+	const scriptFinding = "skill references local shell script execution"
+	const mismatchFinding = "skill instructions diverge from declared purpose"
+
+	tests := []struct {
+		name        string
+		policy      string
+		discovered  bool
+		explicit    string
+		wantCode    int
+		wantOutput  []string
+		wantMissing []string
+	}{
+		{
+			name:       "no policy leaves the corpus findings unchanged",
+			wantCode:   exitFindings,
+			wantOutput: []string{scriptFinding, mismatchFinding},
+		},
+		{
+			name:        "an explicit policy can disable a rule",
+			policy:      "rules:\n  shell-script:\n    enabled: false\n",
+			wantCode:    exitClean,
+			wantOutput:  []string{mismatchFinding},
+			wantMissing: []string{scriptFinding},
+		},
+		{
+			name:        "a policy in the working directory is discovered",
+			policy:      "rules:\n  shell-script:\n    enabled: false\n",
+			discovered:  true,
+			wantCode:    exitClean,
+			wantOutput:  []string{mismatchFinding},
+			wantMissing: []string{scriptFinding},
+		},
+		{
+			name:       "a policy that enables a rule explicitly changes nothing",
+			policy:     "rules:\n  shell-script:\n    enabled: true\n",
+			wantCode:   exitFindings,
+			wantOutput: []string{scriptFinding, mismatchFinding},
+		},
+		{
+			name:        "require naming an unknown rule fails the run",
+			policy:      "require:\n  - shell-scrpt\n",
+			wantCode:    exitFailure,
+			wantOutput:  []string{`require lists unknown rule "shell-scrpt"`},
+			wantMissing: []string{scriptFinding, mismatchFinding},
+		},
+		{
+			name:        "a rules entry naming an unknown rule fails the run",
+			policy:      "rules:\n  shell-scrpt:\n    enabled: false\n",
+			wantCode:    exitFailure,
+			wantOutput:  []string{`rules names unknown rule "shell-scrpt"`},
+			wantMissing: []string{scriptFinding},
+		},
+		{
+			name:        "a malformed policy fails the run",
+			policy:      "rules: [not a mapping\n",
+			wantCode:    exitFailure,
+			wantOutput:  []string{"parse policy"},
+			wantMissing: []string{scriptFinding},
+		},
+		{
+			name:        "an explicit policy that does not exist fails the run",
+			explicit:    "no-such-policy.yaml",
+			wantCode:    exitFailure,
+			wantOutput:  []string{"read policy no-such-policy.yaml"},
+			wantMissing: []string{scriptFinding},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+
+			reportDestination := filepath.Join(t.TempDir(), "skill-wiz-report.html")
+			originalReportPath := reportPath
+			reportPath = func() (string, error) { return reportDestination, nil }
+			originalPolicyDirectory := policyDirectory
+			defer func() {
+				reportPath = originalReportPath
+				policyDirectory = originalPolicyDirectory
+			}()
+
+			args := []string{hiddenBashSkill}
+			if tt.policy != "" {
+				directory := t.TempDir()
+				path := filepath.Join(directory, policy.FileName)
+				if err := os.WriteFile(path, []byte(tt.policy), 0o644); err != nil {
+					t.Fatalf("os.WriteFile() error = %v", err)
+				}
+				if tt.discovered {
+					policyDirectory = func() (string, error) { return directory, nil }
+				} else {
+					args = []string{"--policy", path, hiddenBashSkill}
+				}
+			}
+			if tt.explicit != "" {
+				args = []string{"--policy", tt.explicit, hiddenBashSkill}
+			}
+
+			gotCode := run(args, &stdout, &stderr, false)
+
+			if gotCode != tt.wantCode {
+				t.Fatalf("run() code = %d, want %d", gotCode, tt.wantCode)
+			}
+
+			combined := stdout.String() + stderr.String()
+			for _, want := range tt.wantOutput {
+				if !strings.Contains(combined, want) {
+					t.Fatalf("run() output = %q, want substring %q", combined, want)
+				}
+			}
+			for _, missing := range tt.wantMissing {
+				if strings.Contains(combined, missing) {
+					t.Fatalf("run() output = %q, want no substring %q", combined, missing)
+				}
+			}
+		})
+	}
+}
+
+func TestRunReportsAPolicyFailureOnce(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, policy.FileName)
+	if err := os.WriteFile(path, []byte("rules: [not a mapping\n"), 0o644); err != nil {
+		t.Fatalf("os.WriteFile() error = %v", err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	if got := run([]string{"--policy", path, "examples/HIDDENBASHSKILL.md"}, &stdout, &stderr, false); got != exitFailure {
+		t.Fatalf("run() code = %d, want %d", got, exitFailure)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("run() stdout = %q, want empty", stdout.String())
+	}
+	if count := strings.Count(stderr.String(), path); count != 1 {
+		t.Fatalf("run() stderr named the policy %d times, want 1:\n%s", count, stderr.String())
+	}
+}
+
+func TestEnabledRules(t *testing.T) {
+	all := rules.Default()
+
+	tests := []struct {
+		name     string
+		disabled []string
+		want     []string
+	}{
+		{
+			name: "no policy keeps every rule in order",
+			want: rules.IDs(all),
+		},
+		{
+			name:     "a disabled rule is dropped and the rest keep their order",
+			disabled: []string{"shell-script", "unrelated-url"},
+			want:     []string{"empty-body", "shell-command", "description-mismatch"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var active policy.Policy
+			if len(tt.disabled) > 0 {
+				directory := t.TempDir()
+				document := "rules:\n"
+				for _, id := range tt.disabled {
+					document += "  " + id + ":\n    enabled: false\n"
+				}
+				path := filepath.Join(directory, policy.FileName)
+				if err := os.WriteFile(path, []byte(document), 0o644); err != nil {
+					t.Fatalf("os.WriteFile() error = %v", err)
+				}
+
+				loaded, err := policy.Load(path)
+				if err != nil {
+					t.Fatalf("policy.Load() error = %v", err)
+				}
+				active = loaded
+			}
+
+			got := rules.IDs(enabledRules(all, active))
+
+			if len(got) != len(tt.want) {
+				t.Fatalf("enabledRules() = %v, want %v", got, tt.want)
+			}
+			for i, want := range tt.want {
+				if got[i] != want {
+					t.Fatalf("enabledRules()[%d] = %q, want %q", i, got[i], want)
+				}
 			}
 		})
 	}

@@ -57,6 +57,11 @@ Data flows one way, and every layer returns findings rather than printing:
 - **`scanner`** orchestrates. It owns the `Analyzer` interface
   (`Analyze(*skill.Skill) (result.Result, error)`) and `AnalyzerFunc`, so the LLM is optional and
   swappable.
+- **`policy`** loads the optional `.skill-wiz.yaml` that decides which rules a run enforces. `Load`
+  parses one document with strict field checking, `Discover` looks in a single directory, and
+  `Validate` checks the rule IDs a policy names against the active rule set. It imports neither
+  `rules` nor `skill` — rule identities arrive as strings, and `main` filters its own rule set
+  through `Enabled`.
 - **`discover`** expands the CLI paths into files to scan. A named file is taken as given whatever
   its extension; a directory is walked for `.md` files, skipping hidden entries so `.git` never
   reaches the scanner. Explicit paths keep argument order, directory matches are sorted, duplicates
@@ -83,6 +88,13 @@ Data flows one way, and every layer returns findings rather than printing:
   stray stdout writes, and treat the JSON field names as a contract (add fields, don't rename them).
 
 ### Invariants worth knowing before changing things
+
+- **A policy is resolved once, before anything is scanned.** `rulesForRun` loads and validates the
+  policy and filters `skillRules` through it; a failure there exits `1` with the policy path and no
+  file is scanned. Policy never becomes a finding, and `scanner` still takes a plain rule slice —
+  it learns nothing about configuration. Discovery is `--policy` first, then `.skill-wiz.yaml` in
+  `policyDirectory()` (a test seam over `os.Getwd`); an explicit path that does not exist is a
+  failure, an undiscovered one is an ordinary policy-free run.
 
 - **Validation short-circuits.** If `Validate` fails, `scanFile` returns those findings *without*
   running rules or the LLM.
@@ -195,6 +207,8 @@ Two package-level `var`s exist purely so tests can substitute the model; tests s
   the analyzer and assert which `--model` / `--timeout` reached it.
 - `main.reportPath` — where the HTML report is written; tests point it at `t.TempDir()` so `run`
   never writes `skill-wiz-report.html` into the repo.
+- `main.policyDirectory` — where an undeclared policy file is discovered; `TestMain` points it at an
+  empty temporary directory so the suite never picks up a `.skill-wiz.yaml` from the repository.
 
 ## Working conventions
 

@@ -15,6 +15,7 @@ import (
 
 	"github.com/murraycode/skill-wiz/analyse"
 	"github.com/murraycode/skill-wiz/discover"
+	"github.com/murraycode/skill-wiz/policy"
 	"github.com/murraycode/skill-wiz/render"
 	"github.com/murraycode/skill-wiz/report"
 	"github.com/murraycode/skill-wiz/result"
@@ -70,6 +71,11 @@ var newSkillAnalyzer = func(config analyse.Config) scanner.Analyzer {
 var skillRules = rules.Default()
 var reportPath = defaultReportPath
 
+// policyDirectory is where an undeclared policy file is looked for. It is a var
+// so tests can point discovery at a temporary directory instead of depending on
+// where the suite happens to run.
+var policyDirectory = os.Getwd
+
 // options is the parsed command line for a single run.
 type options struct {
 	paths       []string
@@ -79,6 +85,7 @@ type options struct {
 	timeout     time.Duration
 	failOn      result.Severity
 	concurrency int
+	policy      string
 }
 
 func (o options) analyzerConfig() analyse.Config {
@@ -107,6 +114,15 @@ func run(args []string, stdout io.Writer, stderr io.Writer, terminal bool) int {
 		return exitFailure
 	}
 
+	// A policy that cannot be read, parsed, or validated stops the run before
+	// anything is scanned. Carrying on with a rule set the operator did not ask
+	// for would report a verdict nobody configured.
+	activeRules, err := rulesForRun(opts.policy)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return exitFailure
+	}
+
 	// Preflight the credential once for the whole run. Without it the analysis
 	// leg cannot run, but the deterministic rules can and must: the project's
 	// design goal is that obvious detections never depend on the model. So warn
@@ -120,7 +136,7 @@ func run(args []string, stdout io.Writer, stderr io.Writer, terminal bool) int {
 		analyzer = newSkillAnalyzer(opts.analyzerConfig())
 	}
 
-	outcomes := scanFiles(files, analyzer, opts.concurrency)
+	outcomes := scanFiles(files, activeRules, analyzer, opts.concurrency)
 
 	// Both the results and the failures are consumed in file order, not in the
 	// order the workers finished, so console output, the report, the JSON array,
@@ -201,7 +217,7 @@ type scanOutcome struct {
 // results come back in file order however completion order fell out. There is no
 // shared cancellation: one bad file must never hide the rest, and a fail-fast
 // pool would break exactly that.
-func scanFiles(files []string, analyzer scanner.Analyzer, concurrency int) []scanOutcome {
+func scanFiles(files []string, ruleSet []rules.Rule, analyzer scanner.Analyzer, concurrency int) []scanOutcome {
 	outcomes := make([]scanOutcome, len(files))
 	if len(files) == 0 {
 		return outcomes
@@ -222,7 +238,7 @@ func scanFiles(files []string, analyzer scanner.Analyzer, concurrency int) []sca
 		go func() {
 			defer waitGroup.Done()
 			for index := range indexes {
-				scan, err := scanFile(files[index], analyzer)
+				scan, err := scanFile(files[index], ruleSet, analyzer)
 				outcomes[index] = scanOutcome{scan: scan, err: err}
 			}
 		}()
@@ -246,7 +262,7 @@ type fileScan struct {
 
 // scanFile parses and scans a single file. Validation short-circuits: a skill
 // missing required metadata is never handed to the rules or the analyzer.
-func scanFile(path string, analyzer scanner.Analyzer) (fileScan, error) {
+func scanFile(path string, ruleSet []rules.Rule, analyzer scanner.Analyzer) (fileScan, error) {
 	content, err := os.ReadFile(path)
 	if err != nil {
 		return fileScan{}, fmt.Errorf("failed to read file: %w", err)
@@ -258,7 +274,7 @@ func scanFile(path string, analyzer scanner.Analyzer) (fileScan, error) {
 
 	output := validationResultForSkill(s)
 	if output.Clean() {
-		output, err = scanner.Scanner{Rules: skillRules, Analyzer: analyzer}.Scan(s)
+		output, err = scanner.Scanner{Rules: ruleSet, Analyzer: analyzer}.Scan(s)
 		if err != nil {
 			return fileScan{}, fmt.Errorf("failed to analyze skill: %w", err)
 		}
@@ -277,6 +293,57 @@ func scanError(path string, err error, total int) string {
 	return fmt.Sprintf("%s: %v", path, err)
 }
 
+// rulesForRun resolves the policy for a run and filters the rule set through
+// it. Policy resolution lives here rather than in scanner or rules: the scanner
+// still takes a rule slice and knows nothing about configuration.
+func rulesForRun(requested string) ([]rules.Rule, error) {
+	active, err := loadPolicy(requested)
+	if err != nil {
+		return nil, err
+	}
+	if err := active.Validate(rules.IDs(skillRules)); err != nil {
+		return nil, err
+	}
+
+	return enabledRules(skillRules, active), nil
+}
+
+// loadPolicy applies the discovery order: an explicit --policy wins, and is a
+// failure when it does not exist, because the operator asked for that file by
+// name. Otherwise the working directory is checked, and finding nothing there
+// is an ordinary policy-free run.
+func loadPolicy(requested string) (policy.Policy, error) {
+	if requested != "" {
+		return policy.Load(requested)
+	}
+
+	directory, err := policyDirectory()
+	if err != nil {
+		return policy.Policy{}, fmt.Errorf("failed to resolve the working directory for policy discovery: %w", err)
+	}
+
+	discovered := policy.Discover(directory)
+	if discovered == "" {
+		return policy.Policy{}, nil
+	}
+
+	return policy.Load(discovered)
+}
+
+// enabledRules keeps the rule order the default set declares, so console and
+// report ordering is unchanged by which rules a policy switched off.
+func enabledRules(ruleSet []rules.Rule, active policy.Policy) []rules.Rule {
+	enabled := make([]rules.Rule, 0, len(ruleSet))
+	for _, rule := range ruleSet {
+		if !active.Enabled(rule.ID()) {
+			continue
+		}
+		enabled = append(enabled, rule)
+	}
+
+	return enabled
+}
+
 // parseOptions turns raw arguments into options, reporting invalid flags and
 // values as errors rather than exiting.
 func parseOptions(args []string, stderr io.Writer) (options, error) {
@@ -292,6 +359,7 @@ func parseOptions(args []string, stderr io.Writer) (options, error) {
 	timeout := flags.Duration("timeout", analyse.DefaultTimeout, "maximum time to wait for the analysis leg")
 	failOn := flags.String("fail-on", string(result.SeverityError), "lowest finding severity that fails the run: error, warning, or info")
 	concurrency := flags.Int("concurrency", defaultConcurrency, "how many files to scan at once; --timeout still bounds each analysis request individually")
+	policyPath := flags.String("policy", "", "path to a policy file; defaults to "+policy.FileName+" in the working directory when one is present")
 
 	if err := flags.Parse(args); err != nil {
 		printUsage(flags, stderr)
@@ -326,6 +394,7 @@ func parseOptions(args []string, stderr io.Writer) (options, error) {
 		timeout:     *timeout,
 		failOn:      threshold,
 		concurrency: *concurrency,
+		policy:      strings.TrimSpace(*policyPath),
 	}, nil
 }
 

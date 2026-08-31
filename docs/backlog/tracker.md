@@ -61,7 +61,7 @@ This tracker records implementation progress for backlog stories in `docs/backlo
 
 | Story | Status | Completed On | Notes |
 | --- | --- | --- | --- |
-| `P5-001-policy-support.md` | `in_progress` |  | Stable rule IDs landed as the prerequisite commit; the policy package and CLI wiring are next. |
+| `P5-001-policy-support.md` | `done` | 2026-08-31 | Added stable rule IDs as the prerequisite commit, then a `policy` package that loads one strict `.skill-wiz.yaml` document, discovers it in the working directory only, and validates the rule IDs it names against the active rule set. `--policy` wins over discovery; `rules.<id>.enabled: false` filters `rules.Default()` in `main` so `scanner` stays configuration-unaware, and `require` fails the load when a listed rule is missing or disabled. A policy-free run is byte-identical to before, proven against the `examples/` corpus. Verified `go test ./...`. |
 | `P5-002-environment-specific-rules.md` | `todo` |  | Story rewritten 2026-08-31: scoped to named profiles selected by `--profile`, inheriting everything else from `P5-001`. |
 | `P5-003-severity-overrides.md` | `todo` |  | Story rewritten 2026-08-31: keyed by rule ID, applied after `Merge`, with an additive `overridden_from` JSON field. |
 | `P5-004-repository-summary-reporting.md` | `todo` |  | Story rewritten 2026-08-31: summary is opt-in via `--summary` so the existing JSON contract is untouched; policy dependency dropped. |
