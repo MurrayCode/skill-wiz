@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -32,6 +33,25 @@ const (
 	exitFindings = 2
 )
 
+// maxEvidenceRunes bounds an evidence summary in the console. The HTML report
+// keeps the full text, so truncating here loses nothing.
+const maxEvidenceRunes = 200
+
+// ANSI colours for severity labels. Only the label is coloured, so the rest of
+// a finding line stays greppable.
+const (
+	colorReset   = "\x1b[0m"
+	colorError   = "\x1b[31m"
+	colorWarning = "\x1b[33m"
+	colorInfo    = "\x1b[36m"
+)
+
+var severityColor = map[result.Severity]string{
+	result.SeverityError:   colorError,
+	result.SeverityWarning: colorWarning,
+	result.SeverityInfo:    colorInfo,
+}
+
 // severityRank orders severities so that a threshold can be compared against a
 // finding. An unrecognised severity ranks lowest, so it gates only the most
 // permissive threshold rather than silently failing a build.
@@ -39,6 +59,35 @@ var severityRank = map[result.Severity]int{
 	result.SeverityInfo:    0,
 	result.SeverityWarning: 1,
 	result.SeverityError:   2,
+}
+
+// renderStyle carries the presentation decisions taken in main. run writes to
+// an io.Writer, so whether stdout is a terminal has to arrive as a value rather
+// than be sniffed from inside the render path.
+type renderStyle struct {
+	color bool
+}
+
+// colorEnabled decides whether severity labels are coloured. Colour is opt-out
+// twice over: --no-color and the NO_COLOR convention both silence it, and a
+// non-terminal writer never gets it in the first place.
+func colorEnabled(terminal bool, noColor bool) bool {
+	if !terminal || noColor {
+		return false
+	}
+
+	return os.Getenv("NO_COLOR") == ""
+}
+
+// isTerminal reports whether a file is attached to a character device, which is
+// as close to "a human is watching" as the standard library gets.
+func isTerminal(file *os.File) bool {
+	info, err := file.Stat()
+	if err != nil {
+		return false
+	}
+
+	return info.Mode()&os.ModeCharDevice != 0
 }
 
 // newSkillAnalyzer builds the analyzer for a run. It is a var so tests can
@@ -54,6 +103,7 @@ var reportPath = defaultReportPath
 type options struct {
 	paths   []string
 	json    bool
+	noColor bool
 	model   string
 	timeout time.Duration
 	failOn  result.Severity
@@ -64,10 +114,10 @@ func (o options) analyzerConfig() analyse.Config {
 }
 
 func main() {
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr, isTerminal(os.Stdout)))
 }
 
-func run(args []string, stdout io.Writer, stderr io.Writer) int {
+func run(args []string, stdout io.Writer, stderr io.Writer, terminal bool) int {
 	opts, err := parseOptions(args, stderr)
 	if err != nil {
 		// -h and -help are a request, not a failure: the flag set has already
@@ -119,7 +169,7 @@ func run(args []string, stdout io.Writer, stderr io.Writer) int {
 		return exitCode(scans, failed, opts.failOn)
 	}
 
-	fmt.Fprint(stdout, renderScans(scans, len(files)))
+	fmt.Fprint(stdout, renderScans(scans, len(files), renderStyle{color: colorEnabled(terminal, opts.noColor)}))
 	if destination != "" {
 		fmt.Fprint(stdout, renderReportPointer(destination))
 	}
@@ -195,6 +245,7 @@ func parseOptions(args []string, stderr io.Writer) (options, error) {
 	flags.Usage = func() {}
 
 	emitJSON := flags.Bool("json", false, "print the scan result as JSON instead of human-readable text")
+	noColor := flags.Bool("no-color", false, "never colour severity labels, even when stdout is a terminal")
 	model := flags.String("model", analyse.DefaultModel, "Gemini model used for the analysis leg")
 	timeout := flags.Duration("timeout", analyse.DefaultTimeout, "maximum time to wait for the analysis leg")
 	failOn := flags.String("fail-on", string(result.SeverityError), "lowest finding severity that fails the run: error, warning, or info")
@@ -224,6 +275,7 @@ func parseOptions(args []string, stderr io.Writer) (options, error) {
 	return options{
 		paths:   positional,
 		json:    *emitJSON,
+		noColor: *noColor,
 		model:   strings.TrimSpace(*model),
 		timeout: *timeout,
 		failOn:  threshold,
@@ -395,7 +447,7 @@ func newJSONReport(input jsonInput) jsonReport {
 // exactly as it did before multi-file support; a run over several files heads
 // each result with its path, so findings keep their file even when some of the
 // files failed to scan.
-func renderScans(scans []fileScan, total int) string {
+func renderScans(scans []fileScan, total int, style renderStyle) string {
 	var builder strings.Builder
 	for index, scan := range scans {
 		if total > 1 {
@@ -405,13 +457,73 @@ func renderScans(scans []fileScan, total int) string {
 			fmt.Fprintf(&builder, "=== %s ===\n", scan.path)
 		}
 
-		builder.WriteString(renderResult(scan.result))
+		builder.WriteString(renderResult(scan.result, style))
 	}
 
-	return builder.String()
+	rendered := builder.String()
+	if total <= 1 {
+		return rendered
+	}
+
+	// The clean verdict carries no newline of its own, so close the last
+	// section before the tally rather than running on from it.
+	if rendered != "" && !strings.HasSuffix(rendered, "\n") {
+		rendered += "\n"
+	}
+
+	return rendered + "\n" + renderTally(scans) + "\n"
 }
 
-func renderResult(scanResult result.Result) string {
+// renderTally closes a multi-file run with counts that match the findings
+// printed above it. Aggregation by category belongs to the summary story, not
+// here.
+func renderTally(scans []fileScan) string {
+	counts := make(map[result.Severity]int)
+	clean, flagged, findings := 0, 0, 0
+	for _, scan := range scans {
+		if scan.result.Clean() {
+			clean++
+		} else {
+			flagged++
+		}
+		for _, finding := range scan.result.Findings {
+			findings++
+			counts[finding.Severity]++
+		}
+	}
+
+	tally := fmt.Sprintf("%s scanned · %d clean · %d flagged · %s",
+		pluralize(len(scans), "file"), clean, flagged, pluralize(findings, "finding"))
+	if breakdown := severityBreakdown(counts); breakdown != "" {
+		tally += " (" + breakdown + ")"
+	}
+
+	return tally
+}
+
+// severityBreakdown lists the known severities that actually occurred, highest
+// first. An unrecognised severity still counts towards the total; it just has
+// no bucket to sit in.
+func severityBreakdown(counts map[result.Severity]int) string {
+	parts := make([]string, 0, 3)
+	for _, severity := range []result.Severity{result.SeverityError, result.SeverityWarning, result.SeverityInfo} {
+		if count := counts[severity]; count > 0 {
+			parts = append(parts, fmt.Sprintf("%d %s", count, severity))
+		}
+	}
+
+	return strings.Join(parts, ", ")
+}
+
+func pluralize(count int, noun string) string {
+	if count == 1 {
+		return fmt.Sprintf("%d %s", count, noun)
+	}
+
+	return fmt.Sprintf("%d %ss", count, noun)
+}
+
+func renderResult(scanResult result.Result, style renderStyle) string {
 	if scanResult.Clean() {
 		return analyseCleanMessage()
 	}
@@ -422,14 +534,65 @@ func renderResult(scanResult result.Result) string {
 		fmt.Fprintf(&builder, " from %s checks", formatSources(sources))
 	}
 	builder.WriteString("\n")
-	for _, finding := range scanResult.Findings {
-		fmt.Fprintf(&builder, "[%s] %s (%s): %s\n", finding.Severity, finding.Category, finding.Source, finding.Message)
+	for _, finding := range orderedFindings(scanResult.Findings) {
+		fmt.Fprintf(&builder, "%s %s (%s): %s\n", severityLabel(finding.Severity, style), finding.Category, finding.Source, finding.Message)
 		if finding.Evidence.Summary != "" {
-			fmt.Fprintf(&builder, "Evidence: %s\n", finding.Evidence.Summary)
+			fmt.Fprintf(&builder, "Evidence: %s\n", truncateEvidence(finding.Evidence.Summary))
 		}
 	}
 
 	return builder.String()
+}
+
+// orderedFindings sorts a copy for display, highest severity first. The sort is
+// stable so rule findings stay ahead of analyzer ones within a severity, and it
+// works on a copy so result.Result — and therefore the JSON contract — keeps
+// its merge order.
+func orderedFindings(findings []result.Finding) []result.Finding {
+	ordered := make([]result.Finding, len(findings))
+	copy(ordered, findings)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		return renderRank(ordered[i].Severity) > renderRank(ordered[j].Severity)
+	})
+
+	return ordered
+}
+
+// renderRank orders a severity for display. It is deliberately separate from
+// severityRank: an unrecognised severity gates nothing, and prints last rather
+// than sharing a rank with info.
+func renderRank(severity result.Severity) int {
+	rank, ok := severityRank[severity]
+	if !ok {
+		return -1
+	}
+
+	return rank
+}
+
+func severityLabel(severity result.Severity, style renderStyle) string {
+	label := fmt.Sprintf("[%s]", severity)
+	if !style.color {
+		return label
+	}
+
+	color, ok := severityColor[severity]
+	if !ok {
+		return label
+	}
+
+	return color + label + colorReset
+}
+
+// truncateEvidence keeps a long snippet from swamping the console. The HTML
+// report still carries the full text.
+func truncateEvidence(summary string) string {
+	runes := []rune(summary)
+	if len(runes) <= maxEvidenceRunes {
+		return summary
+	}
+
+	return string(runes[:maxEvidenceRunes]) + "…"
 }
 
 func formatSources(sources []result.Source) string {

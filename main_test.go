@@ -38,6 +38,17 @@ func TestParseOptions(t *testing.T) {
 			want: options{paths: []string{"skill.md"}, json: true, model: "gemini-2.5-pro", timeout: 15 * time.Second, failOn: result.SeverityError},
 		},
 		{
+			name: "no-color is parsed",
+			args: []string{"--no-color", "skill.md"},
+			want: options{
+				paths:   []string{"skill.md"},
+				noColor: true,
+				model:   analyse.DefaultModel,
+				timeout: analyse.DefaultTimeout,
+				failOn:  result.SeverityError,
+			},
+		},
+		{
 			name: "single dash flags are accepted",
 			args: []string{"-json", "-timeout=5s", "skill.md"},
 			want: options{paths: []string{"skill.md"}, json: true, model: analyse.DefaultModel, timeout: 5 * time.Second, failOn: result.SeverityError},
@@ -307,7 +318,7 @@ func TestRenderScans(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := renderScans(tt.scans, tt.total)
+			got := renderScans(tt.scans, tt.total, renderStyle{})
 
 			for _, want := range tt.wants {
 				if !strings.Contains(got, want) {
@@ -404,7 +415,7 @@ func TestRenderValidationResult(t *testing.T) {
 			Message:  "field description is required",
 			Evidence: result.Evidence{Summary: "missing required field: description"},
 		},
-	))
+	), renderStyle{})
 
 	wants := []string{
 		"Scan flagged 2 finding(s) from validation checks",
@@ -475,7 +486,7 @@ func TestRenderResult(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := renderResult(tt.result)
+			got := renderResult(tt.result, renderStyle{})
 			for _, want := range tt.wants {
 				if !strings.Contains(got, want) {
 					t.Fatalf("renderResult() = %q, want substring %q", got, want)
@@ -857,7 +868,7 @@ func TestRun(t *testing.T) {
 				skillRules = scanRules
 			}()
 
-			gotCode := run(args, &stdout, &stderr)
+			gotCode := run(args, &stdout, &stderr, false)
 			if gotCode != tt.wantCode {
 				t.Fatalf("run() code = %d, want %d", gotCode, tt.wantCode)
 			}
@@ -964,6 +975,7 @@ func TestRunMultipleFiles(t *testing.T) {
 				"THIS SKILL APPEARS TO BE CLEAN",
 				"[error] shell (rule): skill references local shell script execution",
 				"Evidence: ./scripts/racing.sh",
+				"2 files scanned · 1 clean · 1 flagged · 2 findings (1 error, 1 warning)",
 			},
 			wantReportFiles:   []string{"skill-wiz-report.html"},
 			wantReportContent: []string{"example skill", "harmless skill", "skill-picker", "CLEANSKILL.md", "HIDDENBASHSKILL.md"},
@@ -1070,7 +1082,7 @@ func TestRunMultipleFiles(t *testing.T) {
 				args = append(args, paths...)
 			}
 
-			gotCode := run(args, &stdout, &stderr)
+			gotCode := run(args, &stdout, &stderr, false)
 			if gotCode != tt.wantCode {
 				t.Fatalf("run() code = %d, want %d (stderr = %q)", gotCode, tt.wantCode, stderr.String())
 			}
@@ -1148,7 +1160,7 @@ func TestRunReportsAnUnknownPath(t *testing.T) {
 
 	missing := filepath.Join(t.TempDir(), "nope.md")
 
-	if got := run([]string{missing}, &stdout, &stderr); got != 1 {
+	if got := run([]string{missing}, &stdout, &stderr, false); got != 1 {
 		t.Fatalf("run() code = %d, want 1", got)
 	}
 	if !strings.Contains(stderr.String(), missing) {
@@ -1176,4 +1188,402 @@ func readFixture(t *testing.T, path string) string {
 	}
 
 	return string(content)
+}
+
+func TestRenderResultOrdersFindingsBySeverity(t *testing.T) {
+	finding := func(source result.Source, severity result.Severity, message string) result.Finding {
+		return result.Finding{
+			Source:   source,
+			Category: result.Category("mixed"),
+			Severity: severity,
+			Message:  message,
+		}
+	}
+
+	tests := []struct {
+		name   string
+		result result.Result
+		want   []string
+	}{
+		{
+			name: "highest severity is printed first",
+			result: result.NewResult(
+				finding(result.SourceRule, result.SeverityInfo, "third"),
+				finding(result.SourceRule, result.SeverityError, "first"),
+				finding(result.SourceRule, result.SeverityWarning, "second"),
+			),
+			want: []string{"first", "second", "third"},
+		},
+		{
+			name: "merge order is kept within a severity",
+			result: result.NewResult(
+				finding(result.SourceRule, result.SeverityWarning, "rule finding"),
+				finding(result.SourceAnalyzer, result.SeverityWarning, "analyzer finding"),
+				finding(result.SourceAnalyzer, result.SeverityError, "analyzer error"),
+			),
+			want: []string{"analyzer error", "rule finding", "analyzer finding"},
+		},
+		{
+			name: "an unknown severity sorts last",
+			result: result.NewResult(
+				finding(result.SourceAnalyzer, result.Severity("critical"), "unknown severity"),
+				finding(result.SourceRule, result.SeverityInfo, "known severity"),
+			),
+			want: []string{"known severity", "unknown severity"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := renderResult(tt.result, renderStyle{})
+
+			previous := -1
+			for _, want := range tt.want {
+				index := strings.Index(got, want)
+				if index < 0 {
+					t.Fatalf("renderResult() = %q, want substring %q", got, want)
+				}
+				if index < previous {
+					t.Fatalf("renderResult() = %q, want %q after the previous finding", got, want)
+				}
+				previous = index
+			}
+		})
+	}
+}
+
+func TestRenderResultDoesNotReorderTheResult(t *testing.T) {
+	scanResult := result.NewResult(
+		result.Finding{Source: result.SourceRule, Category: result.Category("url"), Severity: result.SeverityInfo, Message: "info first"},
+		result.Finding{Source: result.SourceRule, Category: result.Category("shell"), Severity: result.SeverityError, Message: "error second"},
+	)
+
+	renderResult(scanResult, renderStyle{})
+
+	if scanResult.Findings[0].Message != "info first" {
+		t.Fatalf("renderResult() reordered the result: %+v", scanResult.Findings)
+	}
+}
+
+func TestRenderResultTruncatesEvidence(t *testing.T) {
+	tests := []struct {
+		name            string
+		evidence        string
+		wantTruncated   bool
+		wantRuneLength  int
+		wantContainsAll string
+	}{
+		{
+			name:            "short evidence is untouched",
+			evidence:        "./scripts/racing.sh",
+			wantContainsAll: "./scripts/racing.sh",
+		},
+		{
+			name:           "evidence at the limit is untouched",
+			evidence:       strings.Repeat("a", maxEvidenceRunes),
+			wantRuneLength: maxEvidenceRunes,
+		},
+		{
+			name:           "longer evidence is truncated with an ellipsis",
+			evidence:       strings.Repeat("b", maxEvidenceRunes+50),
+			wantTruncated:  true,
+			wantRuneLength: maxEvidenceRunes + 1,
+		},
+		{
+			name:           "truncation counts runes, not bytes",
+			evidence:       strings.Repeat("é", maxEvidenceRunes+10),
+			wantTruncated:  true,
+			wantRuneLength: maxEvidenceRunes + 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := renderResult(result.NewResult(result.Finding{
+				Source:   result.SourceRule,
+				Category: result.Category("shell"),
+				Severity: result.SeverityError,
+				Message:  "flagged",
+				Evidence: result.Evidence{Summary: tt.evidence},
+			}), renderStyle{})
+
+			_, rendered, ok := strings.Cut(got, "Evidence: ")
+			if !ok {
+				t.Fatalf("renderResult() = %q, want an evidence line", got)
+			}
+			rendered = strings.TrimSuffix(rendered, "\n")
+
+			if tt.wantContainsAll != "" && rendered != tt.wantContainsAll {
+				t.Fatalf("evidence = %q, want %q", rendered, tt.wantContainsAll)
+			}
+			if tt.wantRuneLength > 0 && len([]rune(rendered)) != tt.wantRuneLength {
+				t.Fatalf("evidence rune length = %d, want %d", len([]rune(rendered)), tt.wantRuneLength)
+			}
+			if got := strings.HasSuffix(rendered, "…"); got != tt.wantTruncated {
+				t.Fatalf("evidence truncated = %t, want %t", got, tt.wantTruncated)
+			}
+		})
+	}
+}
+
+func TestRenderResultColour(t *testing.T) {
+	scanResult := result.NewResult(
+		result.Finding{Source: result.SourceRule, Category: result.Category("shell"), Severity: result.SeverityError, Message: "shell execution"},
+		result.Finding{Source: result.SourceRule, Category: result.Category("url"), Severity: result.SeverityWarning, Message: "unrelated url"},
+		result.Finding{Source: result.SourceAnalyzer, Category: result.Category("hidden"), Severity: result.SeverityInfo, Message: "worth a look"},
+	)
+
+	tests := []struct {
+		name        string
+		style       renderStyle
+		wants       []string
+		wantMissing []string
+	}{
+		{
+			name:        "plain output carries no escape codes",
+			style:       renderStyle{},
+			wants:       []string{"[error] shell (rule): shell execution", "[warning] url", "[info] hidden"},
+			wantMissing: []string{"\x1b["},
+		},
+		{
+			name:  "colour wraps the severity label only",
+			style: renderStyle{color: true},
+			wants: []string{
+				"\x1b[31m[error]\x1b[0m shell (rule): shell execution",
+				"\x1b[33m[warning]\x1b[0m url (rule): unrelated url",
+				"\x1b[36m[info]\x1b[0m hidden (analyzer): worth a look",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := renderResult(scanResult, tt.style)
+
+			for _, want := range tt.wants {
+				if !strings.Contains(got, want) {
+					t.Fatalf("renderResult() = %q, want substring %q", got, want)
+				}
+			}
+			for _, missing := range tt.wantMissing {
+				if strings.Contains(got, missing) {
+					t.Fatalf("renderResult() = %q, want no substring %q", got, missing)
+				}
+			}
+		})
+	}
+}
+
+func TestRenderScansTally(t *testing.T) {
+	clean := func(path string) fileScan {
+		return fileScan{path: path, result: result.NewCleanResult()}
+	}
+	flagged := func(path string, severities ...result.Severity) fileScan {
+		findings := make([]result.Finding, 0, len(severities))
+		for _, severity := range severities {
+			findings = append(findings, result.Finding{
+				Source:   result.SourceRule,
+				Category: result.Category("shell"),
+				Severity: severity,
+				Message:  "flagged",
+			})
+		}
+
+		return fileScan{path: path, result: result.NewResult(findings...)}
+	}
+
+	tests := []struct {
+		name        string
+		scans       []fileScan
+		total       int
+		wants       []string
+		wantMissing []string
+	}{
+		{
+			name:        "a single file prints no tally",
+			scans:       []fileScan{flagged("one.md", result.SeverityError)},
+			total:       1,
+			wantMissing: []string{"scanned ·", "files scanned"},
+		},
+		{
+			name: "a multi file run ends with one tally",
+			scans: []fileScan{
+				clean("one.md"),
+				flagged("two.md", result.SeverityError, result.SeverityWarning),
+				flagged("three.md", result.SeverityWarning, result.SeverityWarning, result.SeverityInfo),
+			},
+			total: 3,
+			wants: []string{"3 files scanned · 1 clean · 2 flagged · 5 findings (1 error, 3 warning, 1 info)"},
+		},
+		{
+			name:  "a clean multi file run counts no findings",
+			scans: []fileScan{clean("one.md"), clean("two.md")},
+			total: 2,
+			wants: []string{"2 files scanned · 2 clean · 0 flagged · 0 findings"},
+			// No severity breakdown when there is nothing to break down.
+			wantMissing: []string{"("},
+		},
+		{
+			name:  "the tally counts scanned files, not discovered ones",
+			scans: []fileScan{flagged("two.md", result.SeverityError)},
+			total: 2,
+			wants: []string{"1 file scanned · 0 clean · 1 flagged · 1 finding (1 error)"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := renderScans(tt.scans, tt.total, renderStyle{})
+
+			for _, want := range tt.wants {
+				if !strings.Contains(got, want) {
+					t.Fatalf("renderScans() = %q, want substring %q", got, want)
+				}
+			}
+			for _, missing := range tt.wantMissing {
+				if strings.Contains(got, missing) {
+					t.Fatalf("renderScans() = %q, want no substring %q", got, missing)
+				}
+			}
+		})
+	}
+}
+
+func TestRenderScansTallyFollowsACleanFinalFile(t *testing.T) {
+	scans := []fileScan{
+		{path: "one.md", result: result.NewResult(result.Finding{Source: result.SourceRule, Category: "shell", Severity: result.SeverityError, Message: "flagged"})},
+		{path: "two.md", result: result.NewCleanResult()},
+	}
+
+	got := renderScans(scans, 2, renderStyle{})
+
+	// The clean verdict has no trailing newline of its own, so the tally has to
+	// supply one rather than running on from it.
+	if strings.Contains(got, "SURE2 files") || !strings.Contains(got, "SURE\n") {
+		t.Fatalf("renderScans() = %q, want the tally on its own line", got)
+	}
+	if !strings.HasSuffix(got, "2 files scanned · 1 clean · 1 flagged · 1 finding (1 error)\n") {
+		t.Fatalf("renderScans() = %q, want a trailing tally line", got)
+	}
+}
+
+func TestColorEnabled(t *testing.T) {
+	tests := []struct {
+		name     string
+		terminal bool
+		noColor  bool
+		env      string
+		setEnv   bool
+		want     bool
+	}{
+		{name: "a terminal gets colour", terminal: true, want: true},
+		{name: "a non-terminal writer never does", terminal: false, want: false},
+		{name: "--no-color wins over a terminal", terminal: true, noColor: true, want: false},
+		{name: "NO_COLOR wins over a terminal", terminal: true, env: "1", setEnv: true, want: false},
+		{name: "an empty NO_COLOR does not disable colour", terminal: true, env: "", setEnv: true, want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// t.Setenv restores the previous value, so an unset NO_COLOR is
+			// still restored for the cases that clear it.
+			t.Setenv("NO_COLOR", tt.env)
+			if !tt.setEnv {
+				os.Unsetenv("NO_COLOR")
+			}
+
+			if got := colorEnabled(tt.terminal, tt.noColor); got != tt.want {
+				t.Fatalf("colorEnabled(%t, %t) = %t, want %t", tt.terminal, tt.noColor, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRunColour(t *testing.T) {
+	hidden := readFixture(t, filepath.Join("examples", "HIDDENBASHSKILL.md"))
+
+	tests := []struct {
+		name        string
+		terminal    bool
+		flags       []string
+		noColorEnv  string
+		wants       []string
+		wantMissing []string
+	}{
+		{
+			name:        "a non-terminal writer gets no colour",
+			terminal:    false,
+			wants:       []string{"[error] shell (rule)"},
+			wantMissing: []string{"\x1b["},
+		},
+		{
+			name:     "a terminal gets coloured severity labels",
+			terminal: true,
+			wants:    []string{"\x1b[31m[error]\x1b[0m shell (rule)"},
+		},
+		{
+			name:        "--no-color silences a terminal",
+			terminal:    true,
+			flags:       []string{"--no-color"},
+			wants:       []string{"[error] shell (rule)"},
+			wantMissing: []string{"\x1b["},
+		},
+		{
+			name:        "NO_COLOR silences a terminal",
+			terminal:    true,
+			noColorEnv:  "1",
+			wants:       []string{"[error] shell (rule)"},
+			wantMissing: []string{"\x1b["},
+		},
+		{
+			name:        "--json is never coloured",
+			terminal:    true,
+			flags:       []string{"--json"},
+			wants:       []string{`"severity": "error"`},
+			wantMissing: []string{"\x1b["},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("NO_COLOR", tt.noColorEnv)
+			if tt.noColorEnv == "" {
+				os.Unsetenv("NO_COLOR")
+			}
+
+			directory := t.TempDir()
+			path := filepath.Join(directory, "HIDDENBASHSKILL.md")
+			if err := os.WriteFile(path, []byte(hidden), 0o600); err != nil {
+				t.Fatalf("write fixture: %v", err)
+			}
+
+			reportDirectory := t.TempDir()
+			originalReportPath := reportPath
+			reportPath = func() (string, error) {
+				return filepath.Join(reportDirectory, "skill-wiz-report.html"), nil
+			}
+			originalAnalyzer := newSkillAnalyzer
+			newSkillAnalyzer = func(analyse.Config) scanner.Analyzer {
+				return cleanAnalyzer()
+			}
+			defer func() {
+				reportPath = originalReportPath
+				newSkillAnalyzer = originalAnalyzer
+			}()
+
+			var stdout, stderr bytes.Buffer
+			run(append(append([]string{}, tt.flags...), path), &stdout, &stderr, tt.terminal)
+
+			for _, want := range tt.wants {
+				if !strings.Contains(stdout.String(), want) {
+					t.Fatalf("run() stdout = %q, want substring %q", stdout.String(), want)
+				}
+			}
+			for _, missing := range tt.wantMissing {
+				if strings.Contains(stdout.String(), missing) {
+					t.Fatalf("run() stdout = %q, want no substring %q", stdout.String(), missing)
+				}
+			}
+		})
+	}
 }
