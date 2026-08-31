@@ -123,6 +123,7 @@ skill-wiz ~/.claude/skills ./team-skills              # directories and files to
 | Flag | Default | Description |
 | --- | --- | --- |
 | `--json` | `false` | Print the result as JSON and nothing else |
+| `--no-color` | `false` | Never colour severity labels, even when stdout is a terminal |
 | `--model` | `gemini-2.5-flash` | Gemini model used for the analysis leg |
 | `--timeout` | `1m` | Maximum time to wait for the analysis leg |
 | `--fail-on` | `error` | Lowest finding severity that fails the run: `error`, `warning`, or `info` |
@@ -164,7 +165,12 @@ $ skill-wiz examples/CLEANSKILL.md
 THIS SKILL APPEARS TO BE CLEAN, PLEASE MANUALLY VERIFY TO BE SURE
 ```
 
-A run over more than one file heads each result with its path:
+Findings within a file print highest severity first — `error`, then `warning`, then `info` — and
+within a severity they keep the order they were merged in, so deterministic rule findings sit ahead
+of model ones. Severity labels are coloured when stdout is a terminal; colour is off when output is
+piped or redirected, when `NO_COLOR` is set, and whenever `--no-color` is passed.
+
+A run over more than one file heads each result with its path and closes with a single tally:
 
 ```console
 $ skill-wiz examples
@@ -174,8 +180,18 @@ THIS SKILL APPEARS TO BE CLEAN, PLEASE MANUALLY VERIFY TO BE SURE
 Scan flagged 2 finding(s) from rule checks
 [error] shell (rule): skill references local shell script execution
 Evidence: ./scripts/racing.sh
-...
+[warning] mismatch (rule): skill instructions diverge from declared purpose
+Evidence: description keywords [allows date find information racing] conflict with instruction section [following format information return]
+
+2 files scanned · 1 clean · 1 flagged · 2 findings (1 error, 1 warning)
 ```
+
+The tally counts the files that were actually scanned, so a run where one file failed to parse says
+so. A single-file run prints no tally — its `Scan flagged N finding(s)` line already says the same
+thing.
+
+Long evidence is truncated to 200 characters with a trailing `…` so one snippet cannot swamp the
+console. The HTML report always carries the full text.
 
 ### JSON
 

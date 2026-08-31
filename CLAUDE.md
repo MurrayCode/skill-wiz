@@ -64,8 +64,8 @@ Data flows one way, and every layer returns findings rather than printing:
   `html/template`, which is what keeps hostile skill text from becoming markup; don't swap in
   `text/template` or hand-built string concatenation.
 - **`main.go`** is flag parsing, wiring, and rendering, kept testable: `main` only calls
-  `run(args, stdout, stderr) int`. `parseOptions` returns `options` (`paths`, `json`, `model`,
-  `timeout`, `failOn`) or an error; it prints usage itself and the flag set is silenced with `io.Discard` so
+  `run(args, stdout, stderr, terminal) int`. `parseOptions` returns `options` (`paths`, `json`,
+  `noColor`, `model`, `timeout`, `failOn`) or an error; it prints usage itself and the flag set is silenced with `io.Discard` so
   every failure is reported exactly once. `run` scans each discovered file through `scanFile` into a
   `fileScan` (`path`, `skill`, `result`), writes the one report, then renders them together. `--json` prints
   the JSON and nothing else — no clean message, no HTML report pointer — so keep that path free of
@@ -87,6 +87,18 @@ Data flows one way, and every layer returns findings rather than printing:
   `<select>` is `hidden`; the inline script unhides the picker and hides the other sections. Without
   JavaScript a reader still sees every skill rather than one panel and a dead control — keep that
   order if you touch the script.
+- **Presentation lives at render time only.** `renderResult` sorts a *copy* of the findings by
+  `renderRank` (error → warning → info, unknown last) and truncates evidence past
+  `maxEvidenceRunes`; `result.Result` keeps its merge order and the JSON and HTML paths keep the
+  full text. Sorting is stable, so rule findings stay ahead of analyzer findings within a severity.
+- **Colour is a value, not a lookup.** `main` decides with `isTerminal(os.Stdout)` and passes it
+  into `run`, which folds in `--no-color` and `NO_COLOR` via `colorEnabled` and hands the renderer a
+  `renderStyle`. Never sniff `os.Stdout` inside the render path — the tests write to buffers, and
+  colour must stay absent there. Only the severity label is coloured, so the rest of a line stays
+  greppable.
+- **The tally is multi-file only.** `renderScans` closes a run over more than one file with one
+  `N files scanned · … · N findings (…)` line counting the files it actually scanned. A single-file
+  run prints nothing extra, so its output is unchanged.
 - **Exit codes are a three-way contract.** `0` clean, `1` operational failure (usage, discovery,
   read, parse, scan), `2` at least one finding at or above the active threshold. `exitCode` maps a
   finished run onto that, and an operational failure outranks findings — a run with both exits `1`.
