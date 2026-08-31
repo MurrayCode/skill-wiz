@@ -448,3 +448,48 @@ func TestRenderScansTallyFollowsACleanFinalFile(t *testing.T) {
 		t.Fatalf("Scans() = %q, want a trailing tally line", got)
 	}
 }
+
+func TestRenderResultMarksAnOverriddenSeverity(t *testing.T) {
+	tests := []struct {
+		name        string
+		finding     result.Finding
+		wantLine    string
+		wantMissing string
+	}{
+		{
+			name: "an overridden finding names the severity it carried",
+			finding: result.Finding{
+				Source:         result.SourceRule,
+				Category:       result.Category("shell"),
+				Severity:       result.SeverityInfo,
+				Message:        "skill references local shell script execution",
+				OverriddenFrom: result.SeverityError,
+			},
+			wantLine: "[info] shell (rule): skill references local shell script execution (severity overridden from error)",
+		},
+		{
+			name: "an untouched finding reads exactly as it always has",
+			finding: result.Finding{
+				Source:   result.SourceRule,
+				Category: result.Category("shell"),
+				Severity: result.SeverityError,
+				Message:  "skill references local shell script execution",
+			},
+			wantLine:    "[error] shell (rule): skill references local shell script execution",
+			wantMissing: "overridden",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := Result(result.NewResult(tt.finding), Style{})
+
+			if !strings.Contains(got, tt.wantLine) {
+				t.Fatalf("Result() = %q, want substring %q", got, tt.wantLine)
+			}
+			if tt.wantMissing != "" && strings.Contains(got, tt.wantMissing) {
+				t.Fatalf("Result() = %q, want no substring %q", got, tt.wantMissing)
+			}
+		})
+	}
+}

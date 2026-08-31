@@ -127,6 +127,15 @@ type Finding struct {
 	Severity Severity
 	Message  string
 	Evidence Evidence
+	// RuleID names the deterministic rule that produced this finding. It is
+	// empty for validation and analyzer findings, which have no rule identity,
+	// and it is how policy addresses a severity override at a finding.
+	RuleID string
+	// OverriddenFrom records the severity this finding carried before policy
+	// changed it, and is empty when nothing did. Severity always holds the
+	// effective value: a consumer that ignores this field still reads the
+	// severity that gates the exit code.
+	OverriddenFrom Severity
 }
 
 type Result struct {
@@ -186,6 +195,11 @@ func (r Result) Sources() []Source {
 	return sources
 }
 
+// findingKey hashes what a finding says, not where it came from. Source and
+// RuleID are deliberately excluded so a rule and the model reporting the same
+// issue collapse into one; rules merge first, so the rule's provenance wins.
+// OverriddenFrom is excluded because policy is applied after Merge and must
+// never change what collapses.
 func findingKey(finding Finding) string {
 	parts := []string{
 		string(finding.Category),

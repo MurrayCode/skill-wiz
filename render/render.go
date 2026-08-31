@@ -144,7 +144,7 @@ func Result(scanResult result.Result, style Style) string {
 	}
 	builder.WriteString("\n")
 	for _, finding := range orderedFindings(scanResult.Findings) {
-		fmt.Fprintf(&builder, "%s %s (%s): %s\n", severityLabel(finding.Severity, style), finding.Category, finding.Source, finding.Message)
+		fmt.Fprintf(&builder, "%s %s (%s): %s%s\n", severityLabel(finding.Severity, style), finding.Category, finding.Source, finding.Message, overrideNote(finding))
 		if finding.Evidence.Summary != "" {
 			fmt.Fprintf(&builder, "Evidence: %s\n", truncateEvidence(finding.Evidence.Summary))
 		}
@@ -165,6 +165,18 @@ func orderedFindings(findings []result.Finding) []result.Finding {
 	})
 
 	return ordered
+}
+
+// overrideNote marks a finding whose severity policy changed. It goes after the
+// message rather than into the label so that the label stays exactly what it
+// has always been — the severity that actually gates the exit code — and so a
+// grep for "[error]" keeps working.
+func overrideNote(finding result.Finding) string {
+	if finding.OverriddenFrom == "" {
+		return ""
+	}
+
+	return fmt.Sprintf(" (severity overridden from %s)", finding.OverriddenFrom)
 }
 
 func severityLabel(severity result.Severity, style Style) string {

@@ -253,6 +253,8 @@ h1 {
 
 .chip.source { margin-left: auto; color: var(--muted); }
 
+.chip.override { color: var(--muted); border-style: dashed; }
+
 .finding-message {
   margin: 0;
   font-size: 1rem;
@@ -363,6 +365,7 @@ h1 {
     <article class="finding-card severity-{{.Severity}}">
       <div class="finding-head">
         <span class="pill">{{.Severity}}</span>
+        {{if .OverriddenFrom}}<span class="chip override">was {{.OverriddenFrom}}</span>{{end}}
         <span class="chip">{{.Category}}</span>
         {{if .Source}}<span class="chip source">{{.Source}}</span>{{end}}
       </div>

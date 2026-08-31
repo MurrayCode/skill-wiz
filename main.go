@@ -118,7 +118,7 @@ func run(args []string, stdout io.Writer, stderr io.Writer, terminal bool) int {
 	// A policy that cannot be read, parsed, or validated stops the run before
 	// anything is scanned. Carrying on with a rule set the operator did not ask
 	// for would report a verdict nobody configured.
-	activeRules, err := rulesForRun(opts.policy, opts.profile)
+	activePolicy, activeRules, err := resolvePolicy(opts.policy, opts.profile)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return exitFailure
@@ -137,7 +137,7 @@ func run(args []string, stdout io.Writer, stderr io.Writer, terminal bool) int {
 		analyzer = newSkillAnalyzer(opts.analyzerConfig())
 	}
 
-	outcomes := scanFiles(files, activeRules, analyzer, opts.concurrency)
+	outcomes := scanFiles(files, scanSettings{rules: activeRules, policy: activePolicy, analyzer: analyzer}, opts.concurrency)
 
 	// Both the results and the failures are consumed in file order, not in the
 	// order the workers finished, so console output, the report, the JSON array,
@@ -218,7 +218,7 @@ type scanOutcome struct {
 // results come back in file order however completion order fell out. There is no
 // shared cancellation: one bad file must never hide the rest, and a fail-fast
 // pool would break exactly that.
-func scanFiles(files []string, ruleSet []rules.Rule, analyzer scanner.Analyzer, concurrency int) []scanOutcome {
+func scanFiles(files []string, settings scanSettings, concurrency int) []scanOutcome {
 	outcomes := make([]scanOutcome, len(files))
 	if len(files) == 0 {
 		return outcomes
@@ -239,7 +239,7 @@ func scanFiles(files []string, ruleSet []rules.Rule, analyzer scanner.Analyzer, 
 		go func() {
 			defer waitGroup.Done()
 			for index := range indexes {
-				scan, err := scanFile(files[index], ruleSet, analyzer)
+				scan, err := scanFile(files[index], settings)
 				outcomes[index] = scanOutcome{scan: scan, err: err}
 			}
 		}()
@@ -254,6 +254,14 @@ func scanFiles(files []string, ruleSet []rules.Rule, analyzer scanner.Analyzer, 
 	return outcomes
 }
 
+// scanSettings is everything a worker needs to scan one file. It is read-only
+// for the whole run, so every worker shares one copy.
+type scanSettings struct {
+	rules    []rules.Rule
+	policy   policy.Policy
+	analyzer scanner.Analyzer
+}
+
 // fileScan is the outcome of scanning one skill file.
 type fileScan struct {
 	path   string
@@ -263,7 +271,7 @@ type fileScan struct {
 
 // scanFile parses and scans a single file. Validation short-circuits: a skill
 // missing required metadata is never handed to the rules or the analyzer.
-func scanFile(path string, ruleSet []rules.Rule, analyzer scanner.Analyzer) (fileScan, error) {
+func scanFile(path string, settings scanSettings) (fileScan, error) {
 	content, err := os.ReadFile(path)
 	if err != nil {
 		return fileScan{}, fmt.Errorf("failed to read file: %w", err)
@@ -275,13 +283,16 @@ func scanFile(path string, ruleSet []rules.Rule, analyzer scanner.Analyzer) (fil
 
 	output := validationResultForSkill(s)
 	if output.Clean() {
-		output, err = scanner.Scanner{Rules: ruleSet, Analyzer: analyzer}.Scan(s)
+		output, err = scanner.Scanner{Rules: settings.rules, Analyzer: settings.analyzer}.Scan(s)
 		if err != nil {
 			return fileScan{}, fmt.Errorf("failed to analyze skill: %w", err)
 		}
 	}
 
-	return fileScan{path: path, skill: s, result: output}, nil
+	// Severity overrides are applied here, after the scanner has merged the
+	// rule and analyzer findings and before anything renders them, so a policy
+	// can never change what Merge collapses.
+	return fileScan{path: path, skill: s, result: settings.policy.Apply(output)}, nil
 }
 
 // scanError names the file only when a run covers more than one, so single-file
@@ -294,19 +305,21 @@ func scanError(path string, err error, total int) string {
 	return fmt.Sprintf("%s: %v", path, err)
 }
 
-// rulesForRun resolves the policy for a run and filters the rule set through
-// it. Policy resolution lives here rather than in scanner or rules: the scanner
-// still takes a rule slice and knows nothing about configuration.
-func rulesForRun(requested string, profile string) ([]rules.Rule, error) {
+// resolvePolicy loads the policy for a run and filters the rule set through it,
+// returning both: the rules decide what runs, and the policy still has severity
+// overrides to apply to what they find. Policy resolution lives here rather
+// than in scanner or rules — the scanner still takes a plain rule slice and
+// knows nothing about configuration.
+func resolvePolicy(requested string, profile string) (policy.Policy, []rules.Rule, error) {
 	active, err := loadPolicy(requested, profile)
 	if err != nil {
-		return nil, err
+		return policy.Policy{}, nil, err
 	}
 	if err := active.Validate(rules.IDs(skillRules)); err != nil {
-		return nil, err
+		return policy.Policy{}, nil, err
 	}
 
-	return enabledRules(skillRules, active), nil
+	return active, enabledRules(skillRules, active), nil
 }
 
 // loadPolicy applies the discovery order: an explicit --policy wins, and is a
@@ -524,6 +537,11 @@ type jsonFinding struct {
 	Severity string `json:"severity"`
 	Message  string `json:"message"`
 	Evidence string `json:"evidence"`
+	// OverriddenFrom is the severity this finding carried before a policy
+	// changed it. It is additive and omitted when no policy touched the
+	// finding, so severity keeps meaning the effective value that gates the
+	// exit code and a consumer written before this field still reads it.
+	OverriddenFrom string `json:"overridden_from,omitempty"`
 }
 
 // jsonInputs pairs every scan with the one report the run wrote, so a consumer
@@ -577,11 +595,12 @@ func newJSONReport(input jsonInput) jsonReport {
 	}
 	for _, finding := range input.Result.Findings {
 		payload.Findings = append(payload.Findings, jsonFinding{
-			Source:   string(finding.Source),
-			Category: string(finding.Category),
-			Severity: string(finding.Severity),
-			Message:  finding.Message,
-			Evidence: finding.Evidence.Summary,
+			Source:         string(finding.Source),
+			Category:       string(finding.Category),
+			Severity:       string(finding.Severity),
+			Message:        finding.Message,
+			Evidence:       finding.Evidence.Summary,
+			OverriddenFrom: string(finding.OverriddenFrom),
 		})
 	}
 

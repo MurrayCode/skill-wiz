@@ -24,7 +24,15 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/murraycode/skill-wiz/result"
 )
+
+// SeverityOff suppresses a rule's findings without stopping the rule running.
+// It is deliberately not the same as rules.<id>.enabled: false — the rule still
+// runs and still costs what it costs, its findings just do not reach the
+// output, which is what lets a run count what it chose not to report.
+const SeverityOff = "off"
 
 // FileName is the policy file looked for in the working directory. Discovery
 // deliberately does not search upwards, check the home directory, or read an
@@ -52,7 +60,8 @@ type profile struct {
 // ruleConfig is what a policy can say about one rule. Every field is a pointer
 // so that "absent" stays distinguishable from "set to the zero value".
 type ruleConfig struct {
-	Enabled *bool `yaml:"enabled"`
+	Enabled  *bool   `yaml:"enabled"`
+	Severity *string `yaml:"severity"`
 }
 
 // Policy is the effective configuration for a run. Its zero value is the
@@ -116,6 +125,13 @@ func LoadProfile(path string, name string) (Policy, error) {
 		return Policy{}, fmt.Errorf("parse policy %s: must be a single YAML document", path)
 	}
 
+	// Severity values are checked across the whole document, selected profile or
+	// not: a typo in the profile CI uses should fail on a developer's machine
+	// too, not the first time the pipeline runs.
+	if err := validateSeverities(path, parsed); err != nil {
+		return Policy{}, err
+	}
+
 	resolved := Policy{path: path, rules: parsed.Rules, require: parsed.Require}
 	if name == "" {
 		return resolved, nil
@@ -167,6 +183,91 @@ func profileNames(profiles map[string]profile) []string {
 	sort.Strings(names)
 
 	return names
+}
+
+// validateSeverities rejects any severity the vocabulary does not contain,
+// naming the key that carries it.
+func validateSeverities(path string, parsed document) error {
+	if err := checkSeverities(path, "rules", parsed.Rules); err != nil {
+		return err
+	}
+
+	for _, name := range profileNames(parsed.Profiles) {
+		if err := checkSeverities(path, "profiles."+name+".rules", parsed.Profiles[name].Rules); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func checkSeverities(path string, prefix string, configs map[string]ruleConfig) error {
+	for _, id := range sortedKeys(configs) {
+		severity := configs[id].Severity
+		if severity == nil {
+			continue
+		}
+		if *severity == SeverityOff || result.Known(result.Severity(*severity)) {
+			continue
+		}
+
+		return fmt.Errorf("policy %s: %s.%s.severity %q is not one of error, warning, info, off", path, prefix, id, *severity)
+	}
+
+	return nil
+}
+
+// Apply rewrites the severities this policy overrides and drops the findings it
+// switches off.
+//
+// It runs after result.Merge, never before: Merge dedupes on a key that hashes
+// severity, so overriding first would change which findings collapse together —
+// a policy that lowers a rule's severity must not silently start or stop
+// deduping it against the model's version of the same finding.
+//
+// Findings with no rule ID — validation and analyzer ones — pass through
+// untouched. They carry no identity a policy could address, and inventing a
+// second addressing scheme for them is not worth it until someone asks.
+func (p Policy) Apply(scanned result.Result) result.Result {
+	if len(p.rules) == 0 || len(scanned.Findings) == 0 {
+		return scanned
+	}
+
+	kept := make([]result.Finding, 0, len(scanned.Findings))
+	for _, finding := range scanned.Findings {
+		override, ok := p.severityFor(finding.RuleID)
+		switch {
+		case !ok:
+			kept = append(kept, finding)
+		case override == SeverityOff:
+			continue
+		case result.Severity(override) == finding.Severity:
+			// An override that restates the default is not a change, so it
+			// leaves no trace in the output.
+			kept = append(kept, finding)
+		default:
+			finding.OverriddenFrom = finding.Severity
+			finding.Severity = result.Severity(override)
+			kept = append(kept, finding)
+		}
+	}
+
+	return result.NewResult(kept...)
+}
+
+// severityFor reports the severity this policy sets for a rule. An empty ID
+// never matches: a finding with no rule identity is not addressable.
+func (p Policy) severityFor(id string) (string, bool) {
+	if id == "" {
+		return "", false
+	}
+
+	config, ok := p.rules[id]
+	if !ok || config.Severity == nil {
+		return "", false
+	}
+
+	return *config.Severity, true
 }
 
 // Loaded reports whether a policy file backs this Policy.

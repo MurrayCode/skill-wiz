@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/murraycode/skill-wiz/result"
 )
 
 var defaultRuleIDs = []string{"empty-body", "shell-script", "shell-command", "unrelated-url", "description-mismatch"}
@@ -401,5 +403,225 @@ func TestLoadProfileFromAPolicyWithNoProfiles(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "defines no profiles") {
 		t.Fatalf("LoadProfile() error = %q, want it to say the policy defines no profiles", err)
+	}
+}
+
+func TestApply(t *testing.T) {
+	shellFinding := result.Finding{
+		Source:   result.SourceRule,
+		Category: result.Category("shell"),
+		Severity: result.SeverityError,
+		Message:  "skill references local shell script execution",
+		Evidence: result.Evidence{Summary: "./scripts/racing.sh"},
+		RuleID:   "shell-script",
+	}
+	mismatchFinding := result.Finding{
+		Source:   result.SourceRule,
+		Category: result.Category("mismatch"),
+		Severity: result.SeverityWarning,
+		Message:  "skill instructions diverge from declared purpose",
+		RuleID:   "description-mismatch",
+	}
+	analyzerFinding := result.Finding{
+		Source:   result.SourceAnalyzer,
+		Category: result.Category("hidden"),
+		Severity: result.SeverityWarning,
+		Message:  "hidden follow-up action detected",
+	}
+
+	tests := []struct {
+		name           string
+		content        string
+		want           []result.Severity
+		wantOverridden []result.Severity
+	}{
+		{
+			name:           "no policy leaves every severity alone",
+			content:        "",
+			want:           []result.Severity{result.SeverityError, result.SeverityWarning, result.SeverityWarning},
+			wantOverridden: []result.Severity{"", "", ""},
+		},
+		{
+			name:           "a severity can be lowered",
+			content:        "rules:\n  shell-script:\n    severity: info\n",
+			want:           []result.Severity{result.SeverityInfo, result.SeverityWarning, result.SeverityWarning},
+			wantOverridden: []result.Severity{result.SeverityError, "", ""},
+		},
+		{
+			name:           "a severity can be raised",
+			content:        "rules:\n  description-mismatch:\n    severity: error\n",
+			want:           []result.Severity{result.SeverityError, result.SeverityError, result.SeverityWarning},
+			wantOverridden: []result.Severity{"", result.SeverityWarning, ""},
+		},
+		{
+			name:           "an override that restates the default leaves no trace",
+			content:        "rules:\n  shell-script:\n    severity: error\n",
+			want:           []result.Severity{result.SeverityError, result.SeverityWarning, result.SeverityWarning},
+			wantOverridden: []result.Severity{"", "", ""},
+		},
+		{
+			name:           "off drops the finding",
+			content:        "rules:\n  shell-script:\n    severity: off\n",
+			want:           []result.Severity{result.SeverityWarning, result.SeverityWarning},
+			wantOverridden: []result.Severity{"", ""},
+		},
+		{
+			name:           "an analyzer finding is never overridden",
+			content:        "rules:\n  shell-script:\n    severity: info\n  description-mismatch:\n    severity: info\n",
+			want:           []result.Severity{result.SeverityInfo, result.SeverityInfo, result.SeverityWarning},
+			wantOverridden: []result.Severity{result.SeverityError, result.SeverityWarning, ""},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := writePolicy(t, t.TempDir(), tt.content)
+			active, err := Load(path)
+			if err != nil {
+				t.Fatalf("Load() error = %v, want nil", err)
+			}
+
+			got := active.Apply(result.NewResult(shellFinding, mismatchFinding, analyzerFinding))
+
+			if len(got.Findings) != len(tt.want) {
+				t.Fatalf("len(Apply().Findings) = %d, want %d", len(got.Findings), len(tt.want))
+			}
+			for i, want := range tt.want {
+				if got.Findings[i].Severity != want {
+					t.Fatalf("Apply().Findings[%d].Severity = %q, want %q", i, got.Findings[i].Severity, want)
+				}
+				if got.Findings[i].OverriddenFrom != tt.wantOverridden[i] {
+					t.Fatalf("Apply().Findings[%d].OverriddenFrom = %q, want %q", i, got.Findings[i].OverriddenFrom, tt.wantOverridden[i])
+				}
+			}
+		})
+	}
+}
+
+func TestApplyDoesNotChangeWhatMergeCollapses(t *testing.T) {
+	// The rule and the model report the same thing, so Merge collapses them
+	// into one finding with the rule's provenance. Applying an override must
+	// not change that, which is why Apply runs after Merge and never before.
+	ruleFinding := result.Finding{
+		Source:   result.SourceRule,
+		Category: result.Category("shell"),
+		Severity: result.SeverityError,
+		Message:  "skill references local shell script execution",
+		Evidence: result.Evidence{Summary: "./scripts/racing.sh"},
+		RuleID:   "shell-script",
+	}
+	analyzerFinding := ruleFinding
+	analyzerFinding.Source = result.SourceAnalyzer
+	analyzerFinding.RuleID = ""
+
+	path := writePolicy(t, t.TempDir(), "rules:\n  shell-script:\n    severity: info\n")
+	active, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v, want nil", err)
+	}
+
+	merged := result.Merge(result.NewResult(ruleFinding), result.NewResult(analyzerFinding))
+	if len(merged.Findings) != 1 {
+		t.Fatalf("len(Merge().Findings) = %d, want 1", len(merged.Findings))
+	}
+
+	got := active.Apply(merged)
+
+	if len(got.Findings) != 1 {
+		t.Fatalf("len(Apply(Merge()).Findings) = %d, want 1", len(got.Findings))
+	}
+	if got.Findings[0].Source != result.SourceRule {
+		t.Fatalf("Apply(Merge()).Findings[0].Source = %q, want %q", got.Findings[0].Source, result.SourceRule)
+	}
+	if got.Findings[0].Severity != result.SeverityInfo {
+		t.Fatalf("Apply(Merge()).Findings[0].Severity = %q, want %q", got.Findings[0].Severity, result.SeverityInfo)
+	}
+	if got.Findings[0].OverriddenFrom != result.SeverityError {
+		t.Fatalf("Apply(Merge()).Findings[0].OverriddenFrom = %q, want %q", got.Findings[0].OverriddenFrom, result.SeverityError)
+	}
+}
+
+func TestLoadRejectsAnUnknownSeverity(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		wantErr string
+	}{
+		{
+			name:    "in the base policy",
+			content: "rules:\n  shell-script:\n    severity: critical\n",
+			wantErr: `rules.shell-script.severity "critical" is not one of error, warning, info, off`,
+		},
+		{
+			name:    "in a profile that was not selected",
+			content: "profiles:\n  ci:\n    rules:\n      shell-script:\n        severity: eror\n",
+			wantErr: `profiles.ci.rules.shell-script.severity "eror" is not one of error, warning, info, off`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := writePolicy(t, t.TempDir(), tt.content)
+
+			_, err := Load(path)
+
+			if err == nil {
+				t.Fatalf("Load() error = nil, want error containing %q", tt.wantErr)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("Load() error = %q, want substring %q", err, tt.wantErr)
+			}
+			if !strings.Contains(err.Error(), path) {
+				t.Fatalf("Load() error = %q, want the policy path in the message", err)
+			}
+		})
+	}
+}
+
+func TestSeverityOverridesSurviveAProfileOverlay(t *testing.T) {
+	const document = `rules:
+  shell-script:
+    severity: info
+profiles:
+  ci:
+    rules:
+      shell-script:
+        severity: error
+`
+
+	path := writePolicy(t, t.TempDir(), document)
+	finding := result.Finding{
+		Source:   result.SourceRule,
+		Category: result.Category("shell"),
+		Severity: result.SeverityWarning,
+		Message:  "shell",
+		RuleID:   "shell-script",
+	}
+
+	tests := []struct {
+		name    string
+		profile string
+		want    result.Severity
+	}{
+		{name: "the base lowers it", profile: "", want: result.SeverityInfo},
+		{name: "the ci profile raises it", profile: "ci", want: result.SeverityError},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			active, err := LoadProfile(path, tt.profile)
+			if err != nil {
+				t.Fatalf("LoadProfile() error = %v, want nil", err)
+			}
+
+			got := active.Apply(result.NewResult(finding))
+
+			if len(got.Findings) != 1 {
+				t.Fatalf("len(Apply().Findings) = %d, want 1", len(got.Findings))
+			}
+			if got.Findings[0].Severity != tt.want {
+				t.Fatalf("Apply().Findings[0].Severity = %q, want %q", got.Findings[0].Severity, tt.want)
+			}
+		})
 	}
 }

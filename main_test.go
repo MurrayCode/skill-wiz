@@ -1972,3 +1972,120 @@ func TestRunRejectsAProfileWithoutAPolicy(t *testing.T) {
 		t.Fatalf("run() stderr = %q, want it to explain that no policy file was found", stderr.String())
 	}
 }
+
+func TestRunWithSeverityOverrides(t *testing.T) {
+	const scriptFinding = "skill references local shell script execution"
+	const mismatchFinding = "skill instructions diverge from declared purpose"
+
+	tests := []struct {
+		name        string
+		policy      string
+		wantCode    int
+		wantOutput  []string
+		wantMissing []string
+		wantJSON    []jsonFinding
+	}{
+		{
+			name:     "a severity can be lowered below the gate",
+			policy:   "rules:\n  shell-script:\n    severity: info\n",
+			wantCode: exitClean,
+			wantOutput: []string{
+				"[info] shell (rule): " + scriptFinding + " (severity overridden from error)",
+			},
+			wantJSON: []jsonFinding{
+				{Source: "rule", Category: "shell", Severity: "info", Message: scriptFinding, Evidence: "./scripts/racing.sh", OverriddenFrom: "error"},
+				{Source: "rule", Category: "mismatch", Severity: "warning", Message: mismatchFinding, Evidence: "description keywords [allows date find information racing] conflict with instruction section [following format information return]"},
+			},
+		},
+		{
+			name:     "a severity can be raised above the gate",
+			policy:   "rules:\n  description-mismatch:\n    severity: error\n",
+			wantCode: exitFindings,
+			wantOutput: []string{
+				"[error] mismatch (rule): " + mismatchFinding + " (severity overridden from warning)",
+			},
+		},
+		{
+			name:        "off suppresses the finding while the rule still runs",
+			policy:      "rules:\n  shell-script:\n    severity: off\n",
+			wantCode:    exitClean,
+			wantOutput:  []string{mismatchFinding},
+			wantMissing: []string{scriptFinding},
+			wantJSON: []jsonFinding{
+				{Source: "rule", Category: "mismatch", Severity: "warning", Message: mismatchFinding, Evidence: "description keywords [allows date find information racing] conflict with instruction section [following format information return]"},
+			},
+		},
+		{
+			name:        "no override leaves the default severities alone",
+			policy:      "rules:\n  unrelated-url:\n    enabled: false\n",
+			wantCode:    exitFindings,
+			wantOutput:  []string{"[error] shell (rule): " + scriptFinding},
+			wantMissing: []string{"overridden"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), policy.FileName)
+			if err := os.WriteFile(path, []byte(tt.policy), 0o644); err != nil {
+				t.Fatalf("os.WriteFile() error = %v", err)
+			}
+
+			reportDestination := filepath.Join(t.TempDir(), "skill-wiz-report.html")
+			originalReportPath := reportPath
+			reportPath = func() (string, error) { return reportDestination, nil }
+			defer func() { reportPath = originalReportPath }()
+
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+
+			gotCode := run([]string{"--policy", path, "examples/HIDDENBASHSKILL.md"}, &stdout, &stderr, false)
+
+			if gotCode != tt.wantCode {
+				t.Fatalf("run() code = %d, want %d", gotCode, tt.wantCode)
+			}
+			combined := stdout.String() + stderr.String()
+			for _, want := range tt.wantOutput {
+				if !strings.Contains(combined, want) {
+					t.Fatalf("run() output = %q, want substring %q", combined, want)
+				}
+			}
+			for _, missing := range tt.wantMissing {
+				if strings.Contains(combined, missing) {
+					t.Fatalf("run() output = %q, want no substring %q", combined, missing)
+				}
+			}
+
+			if tt.wantJSON == nil {
+				return
+			}
+
+			var jsonOut bytes.Buffer
+			var jsonErr bytes.Buffer
+			if got := run([]string{"--json", "--policy", path, "examples/HIDDENBASHSKILL.md"}, &jsonOut, &jsonErr, false); got != tt.wantCode {
+				t.Fatalf("run(--json) code = %d, want %d", got, tt.wantCode)
+			}
+
+			var decoded jsonReport
+			if err := json.Unmarshal(jsonOut.Bytes(), &decoded); err != nil {
+				t.Fatalf("json.Unmarshal() error = %v, output = %q", err, jsonOut.String())
+			}
+			if !reflect.DeepEqual(decoded.Findings, tt.wantJSON) {
+				t.Fatalf("run(--json) findings = %#v, want %#v", decoded.Findings, tt.wantJSON)
+			}
+
+			page, err := os.ReadFile(reportDestination)
+			if err != nil {
+				t.Fatalf("os.ReadFile(report) error = %v", err)
+			}
+			for _, finding := range tt.wantJSON {
+				if finding.OverriddenFrom == "" {
+					continue
+				}
+				if !strings.Contains(string(page), "was "+finding.OverriddenFrom) {
+					t.Fatalf("report does not record the original severity %q", finding.OverriddenFrom)
+				}
+			}
+		})
+	}
+}

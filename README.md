@@ -164,6 +164,8 @@ behaves exactly as it always has.
 rules:
   shell-command:
     enabled: false
+  description-mismatch:
+    severity: info
 require:
   - shell-script
   - description-mismatch
@@ -172,6 +174,7 @@ require:
 | Key | Meaning |
 | --- | --- |
 | `rules.<id>.enabled` | `false` skips that rule entirely; `true` is the default and states it explicitly |
+| `rules.<id>.severity` | `error`, `warning`, `info`, or `off` — the severity that rule's findings carry |
 | `require` | rule IDs the policy insists on — loading fails if one is missing from the active rule set, or if the same policy disables it |
 
 Rules are named by their **rule ID**, from the table in [What it checks](#what-it-checks) — not by
@@ -188,6 +191,34 @@ rule ID that does not exist, or a `require` entry the policy itself disables all
 policy path in the message. None of them is a finding — the scan never starts. `require` exists so
 that a rule renamed or removed by a refactor fails loudly instead of quietly no longer being
 enforced.
+
+#### Severity overrides
+
+`rules.<id>.severity` moves a rule's findings up or down the scale, or drops them:
+
+```yaml
+rules:
+  shell-command:
+    severity: error    # a warning we treat as a build breaker
+  description-mismatch:
+    severity: off      # the rule still runs; its findings are not reported
+```
+
+`off` and `enabled: false` are **not the same thing**. `enabled: false` stops the rule running at
+all; `off` runs it and drops what it finds. The difference shows up in the run summary, which counts
+what the rules did rather than what was reported.
+
+**Overrides change the exit code, and that is the point.** `severity` holds the effective value
+everywhere — console, JSON, report, and the `--fail-on` gate — so lowering a rule to `info` takes its
+findings below the default threshold and a build that failed on them goes green, while raising one to
+`error` fails a build that passed. If you want a finding to keep failing the build, do not lower it.
+
+An adjusted finding says so in all three outputs rather than changing quietly: the console appends
+`(severity overridden from error)`, the JSON entry gains an additive `"overridden_from": "error"`,
+and the HTML report shows a `was error` chip on the finding card.
+
+Only rule findings can be overridden. Validation and model findings carry no rule ID, so there is
+nothing for a policy to address them by.
 
 #### Profiles
 
@@ -317,7 +348,8 @@ console. The HTML report always carries the full text.
 ```
 
 `source` is one of `validation`, `rule`, or `analyzer`, so you always know whether a finding was
-earned deterministically or suggested by the model.
+earned deterministically or suggested by the model. A finding whose severity a policy changed also
+carries `"overridden_from"` with the severity it had before — additive, and absent otherwise.
 
 A single file emits that object; a run over several files emits a JSON **array** of the same object,
 one entry per scanned file, each carrying the same `report_path`.

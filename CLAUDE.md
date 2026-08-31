@@ -37,7 +37,9 @@ Data flows one way, and every layer returns findings rather than printing:
 `main.run` → `discover.Files` → `main.scanFiles` (bounded pool) → per file: `main.scanFile` (`skill.Parse` → `Skill.Validate` → `scanner.Scan` → (`rules.Scan` + `analyse.GeminiAnalyzer`) → `result.Merge`) → `render.Scans` + `report.Write`
 
 - **`result`** is the leaf package and the common currency. `Finding` carries `Source`
-  (`validation` | `rule` | `analyzer`), `Category`, `Severity`, `Message`, `Evidence`; `Result` wraps
+  (`validation` | `rule` | `analyzer`), `Category`, `Severity`, `Message`, `Evidence`, plus `RuleID`
+  (empty unless a deterministic rule produced it) and `OverriddenFrom` (set only when policy changed
+  the severity); `Result` wraps
   `[]Finding` with `Clean()`. It also owns the shared severity vocabulary — `Severities`, `Known`,
   `GateRank`, `DisplayRank` — plus `FormatSources` and `Pluralize`. Nothing here knows about skills,
   rules, or the LLM — add new producers, not new coupling.
@@ -96,6 +98,16 @@ Data flows one way, and every layer returns findings rather than printing:
   it learns nothing about configuration. Discovery is `--policy` first, then `.skill-wiz.yaml` in
   `policyDirectory()` (a test seam over `os.Getwd`); an explicit path that does not exist is a
   failure, an undiscovered one is an ordinary policy-free run.
+- **Severity overrides are applied after `Merge`, never before.** `policy.Apply` runs in `scanFile`
+  once `scanner.Scan` has merged the rule and analyzer findings, because `findingKey` hashes
+  severity: overriding first would change which findings collapse together. It sets
+  `Finding.OverriddenFrom` to the previous severity and `Finding.Severity` to the effective one, so
+  the exit-code gate, the console, the JSON, and the report all read the effective value and the
+  original is additive everywhere. `off` drops the finding while the rule still runs — deliberately
+  different from `enabled: false`, which stops it running.
+- **Only rule findings are addressable by policy.** `rules.Scan` stamps `Finding.RuleID` with the ID
+  of the rule that produced it; validation and analyzer findings have none, and `Apply` passes
+  anything with an empty ID straight through. Do not invent a second addressing scheme for them.
 - **Profile resolution is an overlay, not a merge, and stays inside `policy`.** `Policy.overlay`
   replaces the base's entry for every rule the profile names, keeps the base's for the rest, and
   swaps the whole `require` list when the profile sets one. Profiles do not nest — the `profile`
@@ -164,7 +176,7 @@ Data flows one way, and every layer returns findings rather than printing:
   output already carries every finding. It runs on the validation path too, so a skill missing
   required metadata still gets a report.
 - **`Merge` dedupes on content, not source.** `findingKey` hashes category + severity + normalised
-  message + evidence, deliberately excluding `Source`, so a rule and the LLM reporting the same issue
+  message + evidence, deliberately excluding `Source`, `RuleID`, and `OverriddenFrom`, so a rule and the LLM reporting the same issue
   collapse into one finding — and since rules merge first, the rule's provenance wins.
 - **The LLM layer fails closed.** Empty output, non-JSON, `clean: true` alongside findings, or a
   finding missing any field all become a `warning` "Analyzer returned unusable response" finding

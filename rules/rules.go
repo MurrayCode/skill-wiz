@@ -86,10 +86,18 @@ func IDs(ruleSet []Rule) []string {
 	return ids
 }
 
+// Scan runs every rule in order and stamps each finding with the ID of the rule
+// that produced it. Stamping here rather than in the rules themselves means a
+// rule cannot forget to, and cannot claim an identity other than the one it was
+// registered under.
 func Scan(s *skill.Skill, rules ...Rule) result.Result {
 	findings := make([]result.Finding, 0)
 	for _, rule := range rules {
-		findings = append(findings, rule.Check(s)...)
+		id := rule.ID()
+		for _, finding := range rule.Check(s) {
+			finding.RuleID = id
+			findings = append(findings, finding)
+		}
 	}
 
 	return result.NewResult(findings...)

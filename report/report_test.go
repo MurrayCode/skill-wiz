@@ -457,3 +457,58 @@ func TestRenderAnalysisSkipped(t *testing.T) {
 		})
 	}
 }
+
+func TestRenderMarksAnOverriddenSeverity(t *testing.T) {
+	tests := []struct {
+		name        string
+		finding     result.Finding
+		wantContain []string
+		wantMissing []string
+	}{
+		{
+			name: "an overridden finding shows what it was",
+			finding: result.Finding{
+				Source:         result.SourceRule,
+				Category:       result.Category("shell"),
+				Severity:       result.SeverityInfo,
+				Message:        "skill references local shell script execution",
+				OverriddenFrom: result.SeverityError,
+			},
+			wantContain: []string{`<span class="chip override">was error</span>`, `severity-info`},
+		},
+		{
+			name: "an untouched finding carries no override chip",
+			finding: result.Finding{
+				Source:   result.SourceRule,
+				Category: result.Category("shell"),
+				Severity: result.SeverityError,
+				Message:  "skill references local shell script execution",
+			},
+			wantMissing: []string{"chip override", "was error"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := Render(Input{
+				SkillName:  "test skill",
+				SourcePath: "skill.md",
+				Result:     result.NewResult(tt.finding),
+			})
+			if err != nil {
+				t.Fatalf("Render() error = %v, want nil", err)
+			}
+
+			for _, want := range tt.wantContain {
+				if !strings.Contains(got, want) {
+					t.Fatalf("Render() = %q, want substring %q", got, want)
+				}
+			}
+			for _, missing := range tt.wantMissing {
+				if strings.Contains(got, missing) {
+					t.Fatalf("Render() contains %q, want it absent", missing)
+				}
+			}
+		})
+	}
+}

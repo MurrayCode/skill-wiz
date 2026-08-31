@@ -108,6 +108,9 @@ type findingView struct {
 	Source   string
 	Message  string
 	Evidence string
+	// OverriddenFrom is the severity a policy moved this finding away from,
+	// empty when none did. Severity is always the effective one.
+	OverriddenFrom string
 }
 
 func newPageView(inputs []Input) pageView {
@@ -184,11 +187,12 @@ func newSkillView(input Input) skillView {
 
 	for _, finding := range findings {
 		view.Findings = append(view.Findings, findingView{
-			Severity: string(finding.Severity),
-			Category: string(finding.Category),
-			Source:   string(finding.Source),
-			Message:  finding.Message,
-			Evidence: strings.TrimSpace(finding.Evidence.Summary),
+			Severity:       string(finding.Severity),
+			Category:       string(finding.Category),
+			Source:         string(finding.Source),
+			Message:        finding.Message,
+			Evidence:       strings.TrimSpace(finding.Evidence.Summary),
+			OverriddenFrom: string(finding.OverriddenFrom),
 		})
 	}
 
