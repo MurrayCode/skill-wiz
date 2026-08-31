@@ -725,7 +725,9 @@ func TestRun(t *testing.T) {
 				if tt.analyzer != nil {
 					return tt.analyzer
 				}
-				return analyzer(config)
+				// A case with no stub must still never reach the real model:
+				// the suite calls the API with or without GEMINI_API_KEY set.
+				return cleanAnalyzer()
 			}
 			if tt.rules != nil {
 				skillRules = tt.rules
@@ -917,9 +919,7 @@ func TestRunMultipleFiles(t *testing.T) {
 			}
 			originalAnalyzer := newSkillAnalyzer
 			newSkillAnalyzer = func(analyse.Config) scanner.Analyzer {
-				return scanner.AnalyzerFunc(func(*skill.Skill) (result.Result, error) {
-					return result.NewCleanResult(), nil
-				})
+				return cleanAnalyzer()
 			}
 			defer func() {
 				reportPath = originalReportPath
@@ -1020,6 +1020,14 @@ func TestRunReportsAnUnknownPath(t *testing.T) {
 	if stdout.Len() != 0 {
 		t.Fatalf("run() stdout = %q, want empty", stdout.String())
 	}
+}
+
+// cleanAnalyzer stands in for the model in cases that only exercise the
+// deterministic legs, so no test depends on the environment for its result.
+func cleanAnalyzer() scanner.Analyzer {
+	return scanner.AnalyzerFunc(func(*skill.Skill) (result.Result, error) {
+		return result.NewCleanResult(), nil
+	})
 }
 
 func readFixture(t *testing.T, path string) string {
