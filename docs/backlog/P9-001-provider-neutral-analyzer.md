@@ -47,11 +47,11 @@ mode this story exists to prevent.
   non-JSON, `clean: true` alongside findings, a finding missing a field — all of it stays in
   `resultFromText`. A provider that hand-rolled its own mapping could quietly return a clean result
   for a broken response, which `P3-002` explicitly rules out.
-- **All four hardening properties are per-provider obligations.** Each provider must put the job
+- **All five prompt-hardening properties are per-provider obligations.** Each provider must put the job
   description in its own system slot, carry the skill content only as the JSON payload in the user
-  turn, set temperature `0`, and request JSON output through whatever mechanism it has. Where a
-  provider has no JSON mode, the shared parser is the backstop but not the excuse — the provider
-  story says how it gets structured output.
+  turn, explicitly instruct the model to treat user content as data, set temperature `0`, and request
+  JSON output through whatever mechanism it has. Where a provider has no JSON mode, the shared parser
+  is the backstop but not the excuse — the provider story says how it gets structured output.
 - **`--provider`, defaulting to `gemini`.** Explicit selection only. Do **not** auto-detect from
   whichever key happens to be exported: a scanner whose verdict depends on ambient environment is
   hard to trust, which is the same reasoning `policy.Discover` records for not searching upwards.
