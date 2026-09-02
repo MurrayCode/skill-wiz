@@ -29,9 +29,12 @@ import (
 )
 
 // SeverityOff suppresses a rule's findings without stopping the rule running.
-// It is deliberately not the same as rules.<id>.enabled: false — the rule still
-// runs and still costs what it costs, its findings just do not reach the
-// output, which is what lets a run count what it chose not to report.
+//
+// It is deliberately not the same as rules.<id>.enabled: false. A rule switched
+// off still runs, so a policy can satisfy a require entry while suppressing the
+// rule's noise — disabling it outright would fail validation instead. Its
+// findings are dropped before anything counts them, so they appear in no
+// output and in no summary figure: they are not findings any more.
 const SeverityOff = "off"
 
 // FileName is the policy file looked for in the working directory. Discovery
@@ -74,19 +77,16 @@ type Policy struct {
 }
 
 // Discover returns the path of the policy file in directory, or "" when there
-// is none. Anything other than a plain missing file — an unreadable directory,
-// a directory named .skill-wiz.yaml — is left for Load to report with its path.
+// is none.
+//
+// Only a plain missing file counts as "none". Anything else there under that
+// name — a directory, an entry that cannot be stat'd — is returned so that Load
+// fails the run with the path in the message. Treating a misconfigured
+// .skill-wiz.yaml as an absent one would silently produce a policy-free run,
+// which is the outcome this package exists to rule out.
 func Discover(directory string) string {
 	path := filepath.Join(directory, FileName)
-	info, err := os.Stat(path)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return ""
-		}
-
-		return path
-	}
-	if info.IsDir() {
+	if _, err := os.Stat(path); err != nil && errors.Is(err, fs.ErrNotExist) {
 		return ""
 	}
 

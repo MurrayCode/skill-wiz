@@ -15,10 +15,15 @@ func TestDiscover(t *testing.T) {
 	tests := []struct {
 		name  string
 		write bool
+		mkdir bool
 		want  bool
 	}{
 		{name: "a policy file in the directory is found", write: true, want: true},
-		{name: "no policy file is not an error", write: false, want: false},
+		{name: "no policy file is not an error", want: false},
+		// A directory under the policy's name is a misconfiguration, not an
+		// absent policy. Returning the path hands it to Load, which fails the
+		// run; returning "" would quietly scan with no policy at all.
+		{name: "a directory named like the policy is reported, not ignored", mkdir: true, want: true},
 	}
 
 	for _, tt := range tests {
@@ -26,6 +31,11 @@ func TestDiscover(t *testing.T) {
 			directory := t.TempDir()
 			if tt.write {
 				writePolicy(t, directory, "rules:\n  shell-script:\n    enabled: false\n")
+			}
+			if tt.mkdir {
+				if err := os.Mkdir(filepath.Join(directory, FileName), 0o755); err != nil {
+					t.Fatalf("os.Mkdir() error = %v", err)
+				}
 			}
 
 			got := Discover(directory)
@@ -37,6 +47,23 @@ func TestDiscover(t *testing.T) {
 				t.Fatalf("Discover() = %q, want empty", got)
 			}
 		})
+	}
+}
+
+func TestLoadRejectsADirectoryNamedLikeThePolicy(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, FileName)
+	if err := os.Mkdir(path, 0o755); err != nil {
+		t.Fatalf("os.Mkdir() error = %v", err)
+	}
+
+	_, err := Load(Discover(directory))
+
+	if err == nil {
+		t.Fatal("Load(Discover()) error = nil, want a failure rather than a policy-free run")
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Fatalf("Load(Discover()) error = %q, want the policy path in the message", err)
 	}
 }
 

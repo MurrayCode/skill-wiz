@@ -100,7 +100,9 @@ Data flows one way, and every layer returns findings rather than printing:
   file is scanned. Policy never becomes a finding, and `scanner` still takes a plain rule slice —
   it learns nothing about configuration. Discovery is `--policy` first, then `.skill-wiz.yaml` in
   `policyDirectory()` (a test seam over `os.Getwd`); an explicit path that does not exist is a
-  failure, an undiscovered one is an ordinary policy-free run.
+  failure, an undiscovered one is an ordinary policy-free run. Only a *missing* file counts as
+  undiscovered — `Discover` returns the path for anything else under that name, including a
+  directory, so a misconfigured `.skill-wiz.yaml` fails the run instead of silently disabling policy.
 - **Severity overrides are applied after `Merge`, never before.** `policy.Apply` runs in `scanFile`
   once `scanner.Scan` has merged the rule and analyzer findings, because `findingKey` hashes
   severity: overriding first would change which findings collapse together. It sets

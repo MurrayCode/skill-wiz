@@ -2325,3 +2325,64 @@ func TestRunReportAlwaysCarriesTheSummary(t *testing.T) {
 		}
 	}
 }
+
+func TestRunRejectsADirectoryNamedLikeThePolicy(t *testing.T) {
+	// A misconfigured .skill-wiz.yaml must stop the run rather than quietly
+	// producing a policy-free one: the whole point of the file is that what it
+	// says is enforced.
+	directory := t.TempDir()
+	path := filepath.Join(directory, policy.FileName)
+	if err := os.Mkdir(path, 0o755); err != nil {
+		t.Fatalf("os.Mkdir() error = %v", err)
+	}
+
+	originalPolicyDirectory := policyDirectory
+	policyDirectory = func() (string, error) { return directory, nil }
+	defer func() { policyDirectory = originalPolicyDirectory }()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	if got := run([]string{"examples/HIDDENBASHSKILL.md"}, &stdout, &stderr, false); got != exitFailure {
+		t.Fatalf("run() code = %d, want %d", got, exitFailure)
+	}
+	if !strings.Contains(stderr.String(), path) {
+		t.Fatalf("run() stderr = %q, want the policy path in the message", stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("run() stdout = %q, want empty", stdout.String())
+	}
+}
+
+func TestRunSummaryExcludesSuppressedFindings(t *testing.T) {
+	// severity: off drops a finding before anything counts it, so the summary
+	// figures agree with the findings printed above them rather than with what
+	// the rules found.
+	path := filepath.Join(t.TempDir(), policy.FileName)
+	if err := os.WriteFile(path, []byte("rules:\n  shell-script:\n    severity: off\n"), 0o644); err != nil {
+		t.Fatalf("os.WriteFile() error = %v", err)
+	}
+
+	reportDestination := filepath.Join(t.TempDir(), "skill-wiz-report.html")
+	originalReportPath := reportPath
+	reportPath = func() (string, error) { return reportDestination, nil }
+	defer func() { reportPath = originalReportPath }()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	run([]string{"--summary", "--policy", path, "examples/HIDDENBASHSKILL.md"}, &stdout, &stderr, false)
+
+	for _, want := range []string{
+		"Files: 1 scanned · 0 clean · 1 flagged · 0 failed",
+		"Severity: 1 warning",
+		"Category: 1 mismatch",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("run() stdout = %q, want substring %q", stdout.String(), want)
+		}
+	}
+	if strings.Contains(stdout.String(), "shell") {
+		t.Fatalf("run() stdout counts a suppressed finding: %q", stdout.String())
+	}
+}

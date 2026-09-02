@@ -206,8 +206,10 @@ rules:
 ```
 
 `off` and `enabled: false` are **not the same thing**. `enabled: false` stops the rule running at
-all; `off` runs it and drops what it finds. The difference shows up in the run summary, which counts
-what the rules did rather than what was reported.
+all, and a rule listed under `require` cannot be disabled — the policy fails to load. `off` runs the
+rule and drops what it finds, so a policy can keep a required rule in place while suppressing its
+findings here. Suppressed findings are dropped before anything counts them: they appear in no
+output and in no summary figure.
 
 **Overrides change the exit code, and that is the point.** `severity` holds the effective value
 everywhere — console, JSON, report, and the `--fail-on` gate — so lowering a rule to `info` takes its
