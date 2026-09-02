@@ -80,3 +80,37 @@ This tracker records implementation progress for backlog stories in `docs/backlo
 | `P6-007-extract-console-renderer.md` | `done` | 2026-08-31 | Moved console rendering into a `render` package importing `result` and the standard library only, with `render.Input` (path plus result) and an exported `render.Style` so colour stays a caller decision. `main.go` dropped to 539 lines and holds no rendering logic; nine rendering test functions moved out of `main_test.go` into `render` and now run without invoking `run`. Console, JSON and HTML output verified byte-identical against a binary built before the move. |
 | `P6-008-structural-prompt-hardening.md` | `done` | 2026-08-31 | Deleted `Analyze(prompt string)` and unexported `AnalyzeWithConfig`, so `GeminiAnalyzer.Analyze` is the only exported way to the model and the `<skill_input>` payload cannot be bypassed. Rewrote the missing-key, client-creation, upstream-failure, timeout and config tests to drive the skill path, using a hostile skill whose body tries to close the wrapper — the prompt assertions now prove `encoding/json` escapes it. |
 | `P6-009-preflight-api-key.md` | `done` | 2026-08-31 | Added `analyse.HasAPIKey` and preflighted it once in `run`: a missing key now prints one warning, passes a nil analyzer, and produces a rules-only run instead of one failure per otherwise-clean file. Marked the skipped leg on the console, on the HTML report (covered by table-driven `report.Render` tests), and with an additive `analysis_skipped` JSON field; the per-call check in `analyse` is unchanged. Added a `TestMain` unsetting the key so the suite no longer depends on the developer's environment. |
+
+## Phase 7
+
+Raised on 2026-09-02 from `docs/publishing-integration.md` (the `P5-005` assessment). These close
+the gaps that assessment named; the integration surfaces themselves stay parked.
+
+| Story | Status | Completed On | Notes |
+| --- | --- | --- | --- |
+| `P7-001-rule-ids-in-json-output.md` | `todo` |  | Serialise `Finding.RuleID` as an additive `rule` field so a consumer can address a finding by the same ID a policy names. |
+| `P7-002-configurable-report-destination.md` | `todo` |  | `--report <path>` over the existing `reportPath` seam, so a CI job can place the page in its artifacts directory. |
+| `P7-003-require-analysis-flag.md` | `todo` |  | `--require-analysis` turning a keyless rules-only run into an operational failure before scanning starts. |
+| `P7-004-ci-recipe-documentation.md` | `todo` |  | README recipes for a pre-commit hook and a CI gate. Documentation only, and the assessment's highest-value item. |
+| `P7-005-required-metadata-rule.md` | `todo` |  | A `required-metadata` rule with a policy-configured field list, plus the per-rule configuration the policy schema needs. Inert without a policy. |
+| `P7-006-finding-source-positions.md` | `todo` |  | Line positions on evidence, excluded from `findingKey`. Prerequisite for any annotating integration; touches every rule that carries evidence. |
+
+## Phase 8
+
+Raised on 2026-09-02. Repository infrastructure rather than scanner behaviour.
+
+| Story | Status | Completed On | Notes |
+| --- | --- | --- | --- |
+| `P8-001-ci-and-release-pipeline.md` | `todo` |  | GitHub Actions CI on push and pull request (format, build, vet, `-race` tests, clean-tree assertion, `examples/` exit-code dogfood, no secrets) plus a tag-triggered release building six binaries with checksums, and the `--version` flag a released binary needs to identify itself. |
+
+## Phase 9
+
+Raised on 2026-09-02. Makes the analysis provider a choice rather than an accident of who wrote the
+tool. Deterministic rules are unaffected.
+
+| Story | Status | Completed On | Notes |
+| --- | --- | --- | --- |
+| `P9-001-provider-neutral-analyzer.md` | `todo` |  | Extract a provider seam inside `analyse` keeping the prompt builder and fail-closed parser shared, add `--provider` and per-provider credentials and default models, record provider/model provenance, and ship the conformance suite every provider must pass. Gemini stays the only implementation and its output is unchanged. |
+| `P9-002-openai-provider.md` | `todo` |  | OpenAI provider over `net/http`, `OPENAI_API_KEY`, JSON response mode, passing the conformance suite. Depends on `P9-001`. |
+| `P9-003-anthropic-provider.md` | `todo` |  | Anthropic provider, `ANTHROPIC_API_KEY`. The only provider with no JSON response mode, so it must guarantee structured output by prefill or forced tool use. Depends on `P9-001`. |
+| `P9-004-xai-grok-provider.md` | `todo` |  | xAI/Grok over the OpenAI-compatible endpoint, `XAI_API_KEY`, tested against xAI's own recorded payloads so a compatibility divergence fails a test rather than a scan. Depends on `P9-001` and `P9-002`. |
