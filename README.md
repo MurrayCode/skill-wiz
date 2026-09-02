@@ -77,15 +77,22 @@ Two properties fall out of that shape, and both are deliberate:
 
 ## What it checks
 
-| Check | Category | Severity | Fires when |
-| --- | --- | --- | --- |
-| Required metadata | `metadata` | 🔴 error | `name` or `description` is missing or blank |
-| Shell script execution | `shell` | 🔴 error | the body tells the agent to run a local `./*.sh` |
-| Shell command | `shell` | 🟡 warning | the body mentions a `bash` / `sh` command line |
-| Unrelated URL | `url` | 🟡 warning | a linked domain shares no vocabulary with the skill's stated purpose |
-| Description mismatch | `mismatch` | 🟡 warning | an instruction section shares no meaningful keywords with the description |
-| Empty body | `content` | 🟡 warning | the frontmatter parses but there are no instructions |
-| Model analysis | model-supplied | varies | Gemini flags suspicious, hidden, or contradictory behaviour |
+| Check | Rule ID | Category | Severity | Fires when |
+| --- | --- | --- | --- | --- |
+| Required metadata | — | `metadata` | 🔴 error | `name` or `description` is missing or blank |
+| Shell script execution | `shell-script` | `shell` | 🔴 error | the body tells the agent to run a local `./*.sh` |
+| Shell command | `shell-command` | `shell` | 🟡 warning | the body mentions a `bash` / `sh` command line |
+| Unrelated URL | `unrelated-url` | `url` | 🟡 warning | a linked domain shares no vocabulary with the skill's stated purpose |
+| Description mismatch | `description-mismatch` | `mismatch` | 🟡 warning | an instruction section shares no meaningful keywords with the description |
+| Empty body | `empty-body` | `content` | 🟡 warning | the frontmatter parses but there are no instructions |
+| Model analysis | — | model-supplied | varies | Gemini flags suspicious, hidden, or contradictory behaviour |
+
+Rule IDs are a stable contract — they never change once published. Required metadata comes from
+validation and model analysis from the analyzer, so neither has one.
+
+`shell-script` and `shell-command` describe the same category from different angles, and a body that
+names a local script is reported by `shell-script` alone: the line naming the script almost always
+mentions `bash` or `sh` too, and one problem should be reported once.
 
 Findings from the rules and the model are merged on content, so when both spot the same thing you see it once.
 
@@ -132,6 +139,9 @@ skill-wiz ~/.claude/skills ./team-skills              # directories and files to
 | `--timeout` | `1m` | Maximum time to wait for the analysis leg |
 | `--fail-on` | `error` | Lowest finding severity that fails the run: `error`, `warning`, or `info` |
 | `--concurrency` | `8` | How many files to scan at once |
+| `--summary` | `false` | Add a run-level summary to the console, and switch `--json` to the `{summary, results}` shape |
+| `--policy` | — | Path to a policy file; defaults to `.skill-wiz.yaml` in the working directory |
+| `--profile` | — | Policy profile to apply; the base policy is used when omitted |
 
 One unreadable or unparseable file never hides the rest: it is reported on stderr and the run
 carries on. However many files a run covers, it writes one HTML report.
@@ -144,6 +154,114 @@ Concurrency changes nothing you can see: results, the report, the JSON array, th
 stderr failure messages all stay in file order however the workers finished, so the output of a
 concurrent run is byte-identical to a sequential one. **`--timeout` remains per request** — it bounds
 each analysis call, not the run as a whole.
+
+### Policy
+
+A run can be configured with a policy file. There is no policy by default, and a run without one
+behaves exactly as it always has.
+
+```yaml
+# .skill-wiz.yaml
+rules:
+  shell-command:
+    enabled: false
+  description-mismatch:
+    severity: info
+require:
+  - shell-script
+  - description-mismatch
+```
+
+| Key | Meaning |
+| --- | --- |
+| `rules.<id>.enabled` | `false` skips that rule entirely; `true` is the default and states it explicitly |
+| `rules.<id>.severity` | `error`, `warning`, `info`, or `off` — the severity that rule's findings carry |
+| `require` | rule IDs the policy insists on — loading fails if one is missing from the active rule set, or if the same policy disables it |
+
+Rules are named by their **rule ID**, from the table in [What it checks](#what-it-checks) — not by
+category, since one category can come from several rules and moving them together is rarely what
+anyone means.
+
+**Discovery is explicit.** `--policy <path>` wins, and naming a file that does not exist fails the
+run. With no flag, `.skill-wiz.yaml` in the working directory is used if it is there. There is no
+upward search, no home directory, and no environment variable: a scanner whose verdict depends on
+where it was run from is hard to trust.
+
+**A bad policy stops the run.** An unreadable file, YAML that does not parse, a misspelled key, a
+rule ID that does not exist, or a `require` entry the policy itself disables all exit `1` with the
+policy path in the message. None of them is a finding — the scan never starts. `require` exists so
+that a rule renamed or removed by a refactor fails loudly instead of quietly no longer being
+enforced.
+
+#### Severity overrides
+
+`rules.<id>.severity` moves a rule's findings up or down the scale, or drops them:
+
+```yaml
+rules:
+  shell-command:
+    severity: error    # a warning we treat as a build breaker
+  description-mismatch:
+    severity: off      # the rule still runs; its findings are not reported
+```
+
+`off` and `enabled: false` are **not the same thing**. `enabled: false` stops the rule running at
+all, and a rule listed under `require` cannot be disabled — the policy fails to load. `off` runs the
+rule and drops what it finds, so a policy can keep a required rule in place while suppressing its
+findings here. Suppressed findings are dropped before anything counts them: they appear in no
+output and in no summary figure.
+
+**Overrides change the exit code, and that is the point.** `severity` holds the effective value
+everywhere — console, JSON, report, and the `--fail-on` gate — so lowering a rule to `info` takes its
+findings below the default threshold and a build that failed on them goes green, while raising one to
+`error` fails a build that passed. If you want a finding to keep failing the build, do not lower it.
+
+An adjusted finding says so in all three outputs rather than changing quietly: the console appends
+`(severity overridden from error)`, the JSON entry gains an additive `"overridden_from": "error"`,
+and the HTML report shows a `was error` chip on the finding card.
+
+Only rule findings can be overridden. Validation and model findings carry no rule ID, so there is
+nothing for a policy to address them by.
+
+#### Profiles
+
+One policy file can define named profiles for the contexts a team scans in — shell execution
+tolerated on a developer's machine, forbidden in CI:
+
+```yaml
+# .skill-wiz.yaml
+rules:
+  shell-command:
+    enabled: false
+profiles:
+  ci:
+    rules:
+      shell-command:
+        enabled: true
+    require:
+      - shell-script
+      - shell-command
+```
+
+```bash
+skill-wiz ~/.claude/skills                    # base policy: shell-command off
+skill-wiz --profile ci --fail-on warning .    # ci profile: shell-command back on and required
+```
+
+`--profile <name>` is the only way to select one. There is **no auto-detection** from `CI`, `ENV`, or
+any other environment variable, for the same reason discovery does not search upwards: a scanner that
+quietly changes its verdict depending on where it runs is worse than one that makes you say which
+rules you want.
+
+The base applies first and the profile overlays it **key by key, never merging**. A rule the profile
+names takes the profile's entry whole — so naming a rule and saying nothing about it returns that
+rule to its default — a rule the profile does not name keeps the base's entry, and a profile
+`require` list replaces the base's outright. Profiles do not inherit from one another; there is
+exactly one overlay to reason about.
+
+Naming a profile the file does not define fails the run and lists the profiles that do exist, rather
+than falling back to the base and quietly enforcing the wrong rules. So does `--profile` with no
+policy file at all.
 
 ### Exit codes
 
@@ -204,6 +322,24 @@ The tally counts the files that were actually scanned, so a run where one file f
 so. A single-file run prints no tally — its `Scan flagged N finding(s)` line already says the same
 thing.
 
+`--summary` adds a run-level breakdown beneath the tally, on a single-file run as much as a
+directory scan:
+
+```console
+$ skill-wiz --summary examples
+
+Summary
+Files: 3 scanned · 1 clean · 2 flagged · 0 failed
+Severity: 1 error, 3 warning
+Category: 2 mismatch, 1 shell, 1 url
+Source: 4 rule
+```
+
+Category and source rows are ordered by count descending, then name ascending, so two runs over the
+same skills produce the same rows in the same order and a diff shows only what changed. Findings a
+policy switched `off` are absent from every figure — they are not findings by the time the run
+counts them.
+
 Long evidence is truncated to 200 characters with a trailing `…` so one snippet cannot swamp the
 console. The HTML report always carries the full text.
 
@@ -233,15 +369,41 @@ console. The HTML report always carries the full text.
 ```
 
 `source` is one of `validation`, `rule`, or `analyzer`, so you always know whether a finding was
-earned deterministically or suggested by the model.
+earned deterministically or suggested by the model. A finding whose severity a policy changed also
+carries `"overridden_from"` with the severity it had before — additive, and absent otherwise.
 
 A single file emits that object; a run over several files emits a JSON **array** of the same object,
 one entry per scanned file, each carrying the same `report_path`.
 
+`--summary` switches the payload to one object instead, with `results` always an array whatever the
+file count:
+
+```json
+{
+  "summary": {
+    "files_scanned": 3,
+    "files_clean": 1,
+    "files_flagged": 2,
+    "files_failed": 0,
+    "findings": 4,
+    "by_severity": [{ "name": "error", "count": 1 }, { "name": "warning", "count": 3 }],
+    "by_category": [{ "name": "mismatch", "count": 2 }, { "name": "shell", "count": 1 }],
+    "by_source": [{ "name": "rule", "count": 4 }]
+  },
+  "results": [{ "path": "examples/CLEANSKILL.md", "...": "..." }]
+}
+```
+
+The default output is untouched by this — object for one file, array for several — so anything
+already parsing it keeps working. Files that failed to scan are counted in `files_failed` and have no
+entry in `results`.
+
 ### HTML report
 
 Every run also writes a self-contained `skill-wiz-report.html` to the working directory: findings
-grouped by severity, with category, source, and evidence for each. No external assets, so it opens
+grouped by severity, with category, source, and evidence for each, headed by the run summary. The
+report shows the summary on every run with no flag needed — it is the one surface with room for it,
+and the page already covers the whole run. No external assets, so it opens
 straight from disk. One run writes one report however many files it covered — every scanned skill
 lands on the same page, with a picker to move between them. Each run overwrites the last, and a
 report that cannot be written is a warning — never a failed scan.
@@ -293,6 +455,7 @@ The rule heuristics are keyword-based and tuned against those three — retune o
 ```text
 main.go     flag parsing, wiring, orchestration, JSON
 discover/   expands CLI paths into the skill files to scan
+policy/     loads .skill-wiz.yaml and decides which rules a run enforces
 skill/      frontmatter parsing and validation
 rules/      deterministic checks
 analyse/    Gemini client and prompt hardening

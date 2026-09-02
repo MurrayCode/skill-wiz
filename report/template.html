@@ -67,6 +67,45 @@ body {
   color: var(--muted);
 }
 
+.summary {
+  margin-bottom: 2rem;
+  padding: 1.1rem 1.35rem 1.35rem;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.summary .section-label { margin: 0 0 0.85rem; }
+
+.figures {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 1.5rem;
+  margin-bottom: 0.85rem;
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.figures b { font-weight: 600; font-size: 1.05rem; color: var(--text); }
+
+.breakdown {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.6rem;
+}
+
+.breakdown-label {
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-right: 0.2rem;
+}
+
 .picker {
   display: flex;
   flex-wrap: wrap;
@@ -253,6 +292,8 @@ h1 {
 
 .chip.source { margin-left: auto; color: var(--muted); }
 
+.chip.override { color: var(--muted); border-style: dashed; }
+
 .finding-message {
   margin: 0;
   font-size: 1rem;
@@ -324,6 +365,34 @@ h1 {
       <span class="kicker">{{if .Multiple}}{{.SkillCount}} skills scanned{{else}}Scan report{{end}}</span>
   </header>
 
+  <section class="summary">
+    <h2 class="section-label">Run summary</h2>
+    <div class="figures">
+      <span class="figure"><b>{{.Summary.FilesScanned}}</b> scanned</span>
+      <span class="figure"><b>{{.Summary.FilesClean}}</b> clean</span>
+      <span class="figure"><b>{{.Summary.FilesFlagged}}</b> flagged</span>
+      <span class="figure"><b>{{.Summary.FilesFailed}}</b> failed</span>
+      <span class="figure"><b>{{.Summary.Findings}}</b> findings</span>
+    </div>
+    {{if .Summary.BySeverity}}
+    <div class="tally">
+      {{range .Summary.BySeverity}}<span class="count severity-{{.Severity}}">{{.Count}} {{.Label}}</span>{{end}}
+    </div>
+    {{end}}
+    {{if .Summary.ByCategory}}
+    <div class="breakdown">
+      <span class="breakdown-label">category</span>
+      {{range .Summary.ByCategory}}<span class="count">{{.Count}} {{.Label}}</span>{{end}}
+    </div>
+    {{end}}
+    {{if .Summary.BySource}}
+    <div class="breakdown">
+      <span class="breakdown-label">source</span>
+      {{range .Summary.BySource}}<span class="count">{{.Count}} {{.Label}}</span>{{end}}
+    </div>
+    {{end}}
+  </section>
+
   {{if .Multiple}}
   <div class="picker" id="picker" hidden>
     <label for="skill-picker">skill</label>
@@ -363,6 +432,7 @@ h1 {
     <article class="finding-card severity-{{.Severity}}">
       <div class="finding-head">
         <span class="pill">{{.Severity}}</span>
+        {{if .OverriddenFrom}}<span class="chip override">was {{.OverriddenFrom}}</span>{{end}}
         <span class="chip">{{.Category}}</span>
         {{if .Source}}<span class="chip source">{{.Source}}</span>{{end}}
       </div>

@@ -15,6 +15,7 @@ import (
 
 	"github.com/murraycode/skill-wiz/analyse"
 	"github.com/murraycode/skill-wiz/discover"
+	"github.com/murraycode/skill-wiz/policy"
 	"github.com/murraycode/skill-wiz/render"
 	"github.com/murraycode/skill-wiz/report"
 	"github.com/murraycode/skill-wiz/result"
@@ -70,6 +71,11 @@ var newSkillAnalyzer = func(config analyse.Config) scanner.Analyzer {
 var skillRules = rules.Default()
 var reportPath = defaultReportPath
 
+// policyDirectory is where an undeclared policy file is looked for. It is a var
+// so tests can point discovery at a temporary directory instead of depending on
+// where the suite happens to run.
+var policyDirectory = os.Getwd
+
 // options is the parsed command line for a single run.
 type options struct {
 	paths       []string
@@ -79,6 +85,9 @@ type options struct {
 	timeout     time.Duration
 	failOn      result.Severity
 	concurrency int
+	policy      string
+	profile     string
+	summary     bool
 }
 
 func (o options) analyzerConfig() analyse.Config {
@@ -107,6 +116,15 @@ func run(args []string, stdout io.Writer, stderr io.Writer, terminal bool) int {
 		return exitFailure
 	}
 
+	// A policy that cannot be read, parsed, or validated stops the run before
+	// anything is scanned. Carrying on with a rule set the operator did not ask
+	// for would report a verdict nobody configured.
+	activePolicy, activeRules, err := resolvePolicy(opts.policy, opts.profile)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return exitFailure
+	}
+
 	// Preflight the credential once for the whole run. Without it the analysis
 	// leg cannot run, but the deterministic rules can and must: the project's
 	// design goal is that obvious detections never depend on the model. So warn
@@ -120,19 +138,20 @@ func run(args []string, stdout io.Writer, stderr io.Writer, terminal bool) int {
 		analyzer = newSkillAnalyzer(opts.analyzerConfig())
 	}
 
-	outcomes := scanFiles(files, analyzer, opts.concurrency)
+	outcomes := scanFiles(files, scanSettings{rules: activeRules, policy: activePolicy, analyzer: analyzer}, opts.concurrency)
 
 	// Both the results and the failures are consumed in file order, not in the
 	// order the workers finished, so console output, the report, the JSON array,
 	// the tally, and the stderr failures all stay deterministic.
 	scans := make([]fileScan, 0, len(files))
-	failed := false
+	failures := 0
 	for index, outcome := range outcomes {
 		if outcome.err != nil {
 			// One unreadable or unparseable file must not hide the rest: report
-			// it, remember the failure for the exit code, and carry on.
+			// it, count the failure for the exit code and the summary, and
+			// carry on.
 			fmt.Fprintln(stderr, scanError(files[index], outcome.err, len(files)))
-			failed = true
+			failures++
 			continue
 		}
 
@@ -142,28 +161,45 @@ func run(args []string, stdout io.Writer, stderr io.Writer, terminal bool) int {
 		return exitFailure
 	}
 
+	summary := result.Summarize(scanResults(scans), failures)
+
 	// One run, one report: every scanned skill lands on the same page.
-	destination := writeReport(scans, analysisSkipped, stderr)
+	destination := writeReport(scans, failures, analysisSkipped, stderr)
 
 	if opts.json {
-		rendered, err := renderJSON(jsonInputs(scans, destination, analysisSkipped))
+		rendered, err := renderRunJSON(jsonInputs(scans, destination, analysisSkipped), opts.summary, summary)
 		if err != nil {
 			fmt.Fprintf(stderr, "failed to render JSON output: %v\n", err)
 			return exitFailure
 		}
 
 		fmt.Fprintln(stdout, rendered)
-		return exitCode(scans, failed, opts.failOn)
+		return exitCode(scans, failures > 0, opts.failOn)
 	}
 
 	if analysisSkipped {
 		fmt.Fprint(stdout, render.AnalysisSkippedNote())
 	}
-	fmt.Fprint(stdout, render.Scans(renderInputs(scans), len(files), render.Style{Color: colorEnabled(terminal, opts.noColor)}))
+	rendered := render.Scans(renderInputs(scans), len(files), render.Style{Color: colorEnabled(terminal, opts.noColor)})
+	if opts.summary {
+		rendered = render.WithSummary(rendered, summary)
+	}
+	fmt.Fprint(stdout, rendered)
 	if destination != "" {
 		fmt.Fprint(stdout, renderReportPointer(destination))
 	}
-	return exitCode(scans, failed, opts.failOn)
+	return exitCode(scans, failures > 0, opts.failOn)
+}
+
+// scanResults is the run's results in file order, which is all the summary
+// needs — it knows nothing about paths.
+func scanResults(scans []fileScan) []result.Result {
+	results := make([]result.Result, 0, len(scans))
+	for _, scan := range scans {
+		results = append(results, scan.result)
+	}
+
+	return results
 }
 
 // exitCode maps a completed run onto its exit code. An operational failure
@@ -201,7 +237,7 @@ type scanOutcome struct {
 // results come back in file order however completion order fell out. There is no
 // shared cancellation: one bad file must never hide the rest, and a fail-fast
 // pool would break exactly that.
-func scanFiles(files []string, analyzer scanner.Analyzer, concurrency int) []scanOutcome {
+func scanFiles(files []string, settings scanSettings, concurrency int) []scanOutcome {
 	outcomes := make([]scanOutcome, len(files))
 	if len(files) == 0 {
 		return outcomes
@@ -222,7 +258,7 @@ func scanFiles(files []string, analyzer scanner.Analyzer, concurrency int) []sca
 		go func() {
 			defer waitGroup.Done()
 			for index := range indexes {
-				scan, err := scanFile(files[index], analyzer)
+				scan, err := scanFile(files[index], settings)
 				outcomes[index] = scanOutcome{scan: scan, err: err}
 			}
 		}()
@@ -237,6 +273,14 @@ func scanFiles(files []string, analyzer scanner.Analyzer, concurrency int) []sca
 	return outcomes
 }
 
+// scanSettings is everything a worker needs to scan one file. It is read-only
+// for the whole run, so every worker shares one copy.
+type scanSettings struct {
+	rules    []rules.Rule
+	policy   policy.Policy
+	analyzer scanner.Analyzer
+}
+
 // fileScan is the outcome of scanning one skill file.
 type fileScan struct {
 	path   string
@@ -246,7 +290,7 @@ type fileScan struct {
 
 // scanFile parses and scans a single file. Validation short-circuits: a skill
 // missing required metadata is never handed to the rules or the analyzer.
-func scanFile(path string, analyzer scanner.Analyzer) (fileScan, error) {
+func scanFile(path string, settings scanSettings) (fileScan, error) {
 	content, err := os.ReadFile(path)
 	if err != nil {
 		return fileScan{}, fmt.Errorf("failed to read file: %w", err)
@@ -258,13 +302,16 @@ func scanFile(path string, analyzer scanner.Analyzer) (fileScan, error) {
 
 	output := validationResultForSkill(s)
 	if output.Clean() {
-		output, err = scanner.Scanner{Rules: skillRules, Analyzer: analyzer}.Scan(s)
+		output, err = scanner.Scanner{Rules: settings.rules, Analyzer: settings.analyzer}.Scan(s)
 		if err != nil {
 			return fileScan{}, fmt.Errorf("failed to analyze skill: %w", err)
 		}
 	}
 
-	return fileScan{path: path, skill: s, result: output}, nil
+	// Severity overrides are applied here, after the scanner has merged the
+	// rule and analyzer findings and before anything renders them, so a policy
+	// can never change what Merge collapses.
+	return fileScan{path: path, skill: s, result: settings.policy.Apply(output)}, nil
 }
 
 // scanError names the file only when a run covers more than one, so single-file
@@ -275,6 +322,66 @@ func scanError(path string, err error, total int) string {
 	}
 
 	return fmt.Sprintf("%s: %v", path, err)
+}
+
+// resolvePolicy loads the policy for a run and filters the rule set through it,
+// returning both: the rules decide what runs, and the policy still has severity
+// overrides to apply to what they find. Policy resolution lives here rather
+// than in scanner or rules — the scanner still takes a plain rule slice and
+// knows nothing about configuration.
+func resolvePolicy(requested string, profile string) (policy.Policy, []rules.Rule, error) {
+	active, err := loadPolicy(requested, profile)
+	if err != nil {
+		return policy.Policy{}, nil, err
+	}
+	if err := active.Validate(rules.IDs(skillRules)); err != nil {
+		return policy.Policy{}, nil, err
+	}
+
+	return active, enabledRules(skillRules, active), nil
+}
+
+// loadPolicy applies the discovery order: an explicit --policy wins, and is a
+// failure when it does not exist, because the operator asked for that file by
+// name. Otherwise the working directory is checked, and finding nothing there
+// is an ordinary policy-free run.
+func loadPolicy(requested string, profile string) (policy.Policy, error) {
+	if requested != "" {
+		return policy.LoadProfile(requested, profile)
+	}
+
+	directory, err := policyDirectory()
+	if err != nil {
+		return policy.Policy{}, fmt.Errorf("failed to resolve the working directory for policy discovery: %w", err)
+	}
+
+	discovered := policy.Discover(directory)
+	if discovered == "" {
+		// A profile only exists inside a policy file, so asking for one when
+		// there is no policy is a broken configuration rather than a run with
+		// nothing configured.
+		if profile != "" {
+			return policy.Policy{}, fmt.Errorf("profile %q was requested but no policy file was found (looked for %s in %s)", profile, policy.FileName, directory)
+		}
+
+		return policy.Policy{}, nil
+	}
+
+	return policy.LoadProfile(discovered, profile)
+}
+
+// enabledRules keeps the rule order the default set declares, so console and
+// report ordering is unchanged by which rules a policy switched off.
+func enabledRules(ruleSet []rules.Rule, active policy.Policy) []rules.Rule {
+	enabled := make([]rules.Rule, 0, len(ruleSet))
+	for _, rule := range ruleSet {
+		if !active.Enabled(rule.ID()) {
+			continue
+		}
+		enabled = append(enabled, rule)
+	}
+
+	return enabled
 }
 
 // parseOptions turns raw arguments into options, reporting invalid flags and
@@ -292,6 +399,9 @@ func parseOptions(args []string, stderr io.Writer) (options, error) {
 	timeout := flags.Duration("timeout", analyse.DefaultTimeout, "maximum time to wait for the analysis leg")
 	failOn := flags.String("fail-on", string(result.SeverityError), "lowest finding severity that fails the run: error, warning, or info")
 	concurrency := flags.Int("concurrency", defaultConcurrency, "how many files to scan at once; --timeout still bounds each analysis request individually")
+	policyPath := flags.String("policy", "", "path to a policy file; defaults to "+policy.FileName+" in the working directory when one is present")
+	profileName := flags.String("profile", "", "name of the policy profile to apply; the base policy is used when omitted")
+	summary := flags.Bool("summary", false, "add a run-level summary to the console output, and switch --json to the {summary, results} shape")
 
 	if err := flags.Parse(args); err != nil {
 		printUsage(flags, stderr)
@@ -326,6 +436,9 @@ func parseOptions(args []string, stderr io.Writer) (options, error) {
 		timeout:     *timeout,
 		failOn:      threshold,
 		concurrency: *concurrency,
+		policy:      strings.TrimSpace(*policyPath),
+		profile:     strings.TrimSpace(*profileName),
+		summary:     *summary,
 	}, nil
 }
 
@@ -351,7 +464,7 @@ func printUsage(flags *flag.FlagSet, w io.Writer) {
 // writeReport saves the run's HTML report and returns where it landed, or ""
 // when it could not be written. A report that cannot be written is a warning,
 // not a scan failure: the console output already carries every finding.
-func writeReport(scans []fileScan, analysisSkipped bool, stderr io.Writer) string {
+func writeReport(scans []fileScan, filesFailed int, analysisSkipped bool, stderr io.Writer) string {
 	destination, err := reportPath()
 	if err != nil {
 		fmt.Fprintf(stderr, "failed to resolve HTML report path: %v\n", err)
@@ -370,7 +483,7 @@ func writeReport(scans []fileScan, analysisSkipped bool, stderr io.Writer) strin
 		})
 	}
 
-	if err := report.Write(destination, inputs...); err != nil {
+	if err := report.Write(destination, report.Run{FilesFailed: filesFailed}, inputs...); err != nil {
 		fmt.Fprintf(stderr, "failed to write HTML report: %v\n", err)
 		return ""
 	}
@@ -434,6 +547,31 @@ type jsonReport struct {
 	AnalysisSkipped bool `json:"analysis_skipped,omitempty"`
 }
 
+// jsonRun is the --summary payload: one object carrying the run summary and the
+// per-file results. results is always an array here, whatever the file count,
+// so a consumer that opts into this shape has one shape to parse rather than
+// two.
+type jsonRun struct {
+	Summary jsonSummary  `json:"summary"`
+	Results []jsonReport `json:"results"`
+}
+
+type jsonSummary struct {
+	FilesScanned int         `json:"files_scanned"`
+	FilesClean   int         `json:"files_clean"`
+	FilesFlagged int         `json:"files_flagged"`
+	FilesFailed  int         `json:"files_failed"`
+	Findings     int         `json:"findings"`
+	BySeverity   []jsonCount `json:"by_severity"`
+	ByCategory   []jsonCount `json:"by_category"`
+	BySource     []jsonCount `json:"by_source"`
+}
+
+type jsonCount struct {
+	Name  string `json:"name"`
+	Count int    `json:"count"`
+}
+
 type jsonSkill struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`
@@ -445,6 +583,11 @@ type jsonFinding struct {
 	Severity string `json:"severity"`
 	Message  string `json:"message"`
 	Evidence string `json:"evidence"`
+	// OverriddenFrom is the severity this finding carried before a policy
+	// changed it. It is additive and omitted when no policy touched the
+	// finding, so severity keeps meaning the effective value that gates the
+	// exit code and a consumer written before this field still reads it.
+	OverriddenFrom string `json:"overridden_from,omitempty"`
 }
 
 // jsonInputs pairs every scan with the one report the run wrote, so a consumer
@@ -464,19 +607,65 @@ func jsonInputs(scans []fileScan, reportPath string, analysisSkipped bool) []jso
 	return inputs
 }
 
+// renderRunJSON picks the payload shape for a run. Without --summary it is the
+// contract it has always been, so anything already parsing this output keeps
+// working; with --summary it is one object carrying the summary and the results.
+// The default is deliberately not switched to the object form: an array has
+// nowhere to put a summary, and quietly changing the default would break
+// existing callers.
+func renderRunJSON(inputs []jsonInput, withSummary bool, summary result.Summary) (string, error) {
+	if withSummary {
+		return encodeJSON(jsonRun{Summary: newJSONSummary(summary), Results: jsonReports(inputs)})
+	}
+
+	return renderJSON(inputs)
+}
+
 // renderJSON encodes the scans. A single scan stays the object it has always
 // been; several scans become an array of that same object.
 func renderJSON(inputs []jsonInput) (string, error) {
-	reports := make([]jsonReport, 0, len(inputs))
-	for _, input := range inputs {
-		reports = append(reports, newJSONReport(input))
-	}
+	reports := jsonReports(inputs)
 
 	var payload any = reports
 	if len(reports) == 1 {
 		payload = reports[0]
 	}
 
+	return encodeJSON(payload)
+}
+
+func jsonReports(inputs []jsonInput) []jsonReport {
+	reports := make([]jsonReport, 0, len(inputs))
+	for _, input := range inputs {
+		reports = append(reports, newJSONReport(input))
+	}
+
+	return reports
+}
+
+func newJSONSummary(summary result.Summary) jsonSummary {
+	return jsonSummary{
+		FilesScanned: summary.FilesScanned,
+		FilesClean:   summary.FilesClean,
+		FilesFlagged: summary.FilesFlagged,
+		FilesFailed:  summary.FilesFailed,
+		Findings:     summary.Findings,
+		BySeverity:   jsonCounts(summary.BySeverity),
+		ByCategory:   jsonCounts(summary.ByCategory),
+		BySource:     jsonCounts(summary.BySource),
+	}
+}
+
+func jsonCounts(counts []result.Count) []jsonCount {
+	rows := make([]jsonCount, 0, len(counts))
+	for _, count := range counts {
+		rows = append(rows, jsonCount{Name: count.Name, Count: count.Count})
+	}
+
+	return rows
+}
+
+func encodeJSON(payload any) (string, error) {
 	encoded, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
 		return "", fmt.Errorf("encode JSON result: %w", err)
@@ -498,11 +687,12 @@ func newJSONReport(input jsonInput) jsonReport {
 	}
 	for _, finding := range input.Result.Findings {
 		payload.Findings = append(payload.Findings, jsonFinding{
-			Source:   string(finding.Source),
-			Category: string(finding.Category),
-			Severity: string(finding.Severity),
-			Message:  finding.Message,
-			Evidence: finding.Evidence.Summary,
+			Source:         string(finding.Source),
+			Category:       string(finding.Category),
+			Severity:       string(finding.Severity),
+			Message:        finding.Message,
+			Evidence:       finding.Evidence.Summary,
+			OverriddenFrom: string(finding.OverriddenFrom),
 		})
 	}
 

@@ -37,16 +37,21 @@ Data flows one way, and every layer returns findings rather than printing:
 `main.run` → `discover.Files` → `main.scanFiles` (bounded pool) → per file: `main.scanFile` (`skill.Parse` → `Skill.Validate` → `scanner.Scan` → (`rules.Scan` + `analyse.GeminiAnalyzer`) → `result.Merge`) → `render.Scans` + `report.Write`
 
 - **`result`** is the leaf package and the common currency. `Finding` carries `Source`
-  (`validation` | `rule` | `analyzer`), `Category`, `Severity`, `Message`, `Evidence`; `Result` wraps
+  (`validation` | `rule` | `analyzer`), `Category`, `Severity`, `Message`, `Evidence`, plus `RuleID`
+  (empty unless a deterministic rule produced it) and `OverriddenFrom` (set only when policy changed
+  the severity); `Result` wraps
   `[]Finding` with `Clean()`. It also owns the shared severity vocabulary — `Severities`, `Known`,
-  `GateRank`, `DisplayRank` — plus `FormatSources` and `Pluralize`. Nothing here knows about skills,
+  `GateRank`, `DisplayRank` — plus `FormatSources`, `Pluralize`, and `Summarize`/`Summary`/`Count`,
+  the run-level aggregate (files failed is passed in, because `result` knows nothing about paths). Nothing here knows about skills,
   rules, or the LLM — add new producers, not new coupling.
 - **`skill`** parses and validates only. `Parse` normalises CRLF and accepts both a `\n---\n` closing
   fence and a trailing `\n---` at EOF. `Validate` returns `ValidationErrors` (a slice of field-level
   `ValidationError`), which `main` unpacks into one finding per missing field.
-- **`rules`** holds the deterministic checks — `Default()` is empty-body, shell-execution,
-  unrelated-URL, and description-mismatch. A rule is anything with
-  `Check(*skill.Skill) []result.Finding`; `RuleFunc` adapts plain functions.
+- **`rules`** holds the deterministic checks — `Default()` is empty-body, shell-script,
+  shell-command, unrelated-URL, and description-mismatch. A rule is anything with
+  `ID() string` and `Check(*skill.Skill) []result.Finding`; `RuleFunc` pairs a plain function with
+  its ID, and `IDs` lists a rule set's identifiers. The IDs are a **public contract** — policy files
+  name rules by them, so add IDs but never rename one.
 - **`analyse`** wraps Gemini behind the same contract. `GeminiAnalyzer.Analyze(*skill.Skill)` is the
   **only** exported way to the model: it builds the hardened payload and delegates to the unexported
   `analyzeWithConfig(prompt string, Config)`. `Config` carries `Model` and `Timeout`; its zero value
@@ -55,6 +60,12 @@ Data flows one way, and every layer returns findings rather than printing:
 - **`scanner`** orchestrates. It owns the `Analyzer` interface
   (`Analyze(*skill.Skill) (result.Result, error)`) and `AnalyzerFunc`, so the LLM is optional and
   swappable.
+- **`policy`** loads the optional `.skill-wiz.yaml` that decides which rules a run enforces.
+  `LoadProfile` parses one document with strict field checking and resolves the base against a named
+  profile (`Load` is the no-profile case), `Discover` looks in a single directory, and `Validate`
+  checks the rule IDs a policy names against the active rule set. It imports neither
+  `rules` nor `skill` — rule identities arrive as strings, and `main` filters its own rule set
+  through `Enabled`.
 - **`discover`** expands the CLI paths into files to scan. A named file is taken as given whatever
   its extension; a directory is walked for `.md` files, skipping hidden entries so `.git` never
   reaches the scanner. Explicit paths keep argument order, directory matches are sorted, duplicates
@@ -66,7 +77,9 @@ Data flows one way, and every layer returns findings rather than printing:
   which arrives as a `render.Style` value. JSON stays in `main`: it is an output contract, not
   console presentation.
 - **`report`** renders a run into one self-contained HTML page from the embedded
-  `report/template.html`. `Render`/`Write` are variadic over `Input` (one per scanned skill): a single
+  `report/template.html`. `Render`/`Write` take a `Run` (only what cannot be derived from the
+  inputs — the count of files that failed to scan) and are variadic over `Input` (one per scanned
+  skill): a single
   skill renders exactly as before, several render as stacked `.skill` sections plus a `<select>`
   picker. It imports `result` only — it knows nothing about skills or rules. Every field goes through
   `html/template`, which is what keeps hostile skill text from becoming markup; don't swap in
@@ -81,6 +94,30 @@ Data flows one way, and every layer returns findings rather than printing:
   stray stdout writes, and treat the JSON field names as a contract (add fields, don't rename them).
 
 ### Invariants worth knowing before changing things
+
+- **A policy is resolved once, before anything is scanned.** `rulesForRun` loads and validates the
+  policy and filters `skillRules` through it; a failure there exits `1` with the policy path and no
+  file is scanned. Policy never becomes a finding, and `scanner` still takes a plain rule slice —
+  it learns nothing about configuration. Discovery is `--policy` first, then `.skill-wiz.yaml` in
+  `policyDirectory()` (a test seam over `os.Getwd`); an explicit path that does not exist is a
+  failure, an undiscovered one is an ordinary policy-free run. Only a *missing* file counts as
+  undiscovered — `Discover` returns the path for anything else under that name, including a
+  directory, so a misconfigured `.skill-wiz.yaml` fails the run instead of silently disabling policy.
+- **Severity overrides are applied after `Merge`, never before.** `policy.Apply` runs in `scanFile`
+  once `scanner.Scan` has merged the rule and analyzer findings, because `findingKey` hashes
+  severity: overriding first would change which findings collapse together. It sets
+  `Finding.OverriddenFrom` to the previous severity and `Finding.Severity` to the effective one, so
+  the exit-code gate, the console, the JSON, and the report all read the effective value and the
+  original is additive everywhere. `off` drops the finding while the rule still runs — deliberately
+  different from `enabled: false`, which stops it running.
+- **Only rule findings are addressable by policy.** `rules.Scan` stamps `Finding.RuleID` with the ID
+  of the rule that produced it; validation and analyzer findings have none, and `Apply` passes
+  anything with an empty ID straight through. Do not invent a second addressing scheme for them.
+- **Profile resolution is an overlay, not a merge, and stays inside `policy`.** `Policy.overlay`
+  replaces the base's entry for every rule the profile names, keeps the base's for the rest, and
+  swaps the whole `require` list when the profile sets one. Profiles do not nest — the `profile`
+  struct has no `profiles` field, so strict decoding rejects one. Everything downstream of
+  resolution consumes a single effective `Policy` and never learns that profiles exist.
 
 - **Validation short-circuits.** If `Validate` fails, `scanFile` returns those findings *without*
   running rules or the LLM.
@@ -118,6 +155,13 @@ Data flows one way, and every layer returns findings rather than printing:
   `render.Style`. Never sniff `os.Stdout` inside the `render` package — the tests write to buffers, and
   colour must stay absent there. Only the severity label is coloured, so the rest of a line stays
   greppable.
+- **The summary is opt-in on the console and in JSON, and always on in the report.** `--summary`
+  appends `render.WithSummary` to the console output and switches `--json` to
+  `{"summary": ..., "results": [...]}` with `results` always an array. Without the flag the JSON is
+  exactly what it has always been — object for one file, array for several — because an array has
+  nowhere to put a summary and changing the default would break existing callers silently. The HTML
+  report renders the summary on every run and derives it from the inputs it is about to show, so the
+  figures at the top cannot disagree with the cards below.
 - **The tally is multi-file only.** `render.Scans` closes a run over more than one file with one
   `N files scanned · … · N findings (…)` line counting the files it actually scanned. A single-file
   run prints nothing extra, so its output is unchanged.
@@ -144,7 +188,7 @@ Data flows one way, and every layer returns findings rather than printing:
   output already carries every finding. It runs on the validation path too, so a skill missing
   required metadata still gets a report.
 - **`Merge` dedupes on content, not source.** `findingKey` hashes category + severity + normalised
-  message + evidence, deliberately excluding `Source`, so a rule and the LLM reporting the same issue
+  message + evidence, deliberately excluding `Source`, `RuleID`, and `OverriddenFrom`, so a rule and the LLM reporting the same issue
   collapse into one finding — and since rules merge first, the rule's provenance wins.
 - **The LLM layer fails closed.** Empty output, non-JSON, `clean: true` alongside findings, or a
   finding missing any field all become a `warning` "Analyzer returned unusable response" finding
@@ -158,6 +202,11 @@ Data flows one way, and every layer returns findings rather than printing:
   vocabulary with the skill's stated intent, and a URL the name or description declares *is* part of
   that intent — only the body's own links are removed, so a link cannot vouch for itself. Stripping
   the joined string instead would newly flag body URLs that a metadata URL used to vouch for.
+- **`shell-command` stands down on a body `shell-script` already claimed.** The line naming a local
+  script almost always mentions `bash` or `sh` too, so `shellCommandRule` returns nothing when
+  `localShellScriptPattern` matches anywhere in the body — one problem, one finding. It defers on the
+  *pattern*, not on whether the other rule ran, so disabling `shell-script` through policy removes
+  that finding without a warning appearing in its place.
 - The rule heuristics are keyword/token based and were tuned against the fixtures in `examples/`.
   Changing tokenisation (`tokenSet`, `keywords`, `ignoredToken`, `weakMismatchOverlap`) will move
   fixture results — re-run `go test ./rules/...`. Tokenisation must also stay **rune-safe**: iterate
@@ -188,6 +237,8 @@ Two package-level `var`s exist purely so tests can substitute the model; tests s
   the analyzer and assert which `--model` / `--timeout` reached it.
 - `main.reportPath` — where the HTML report is written; tests point it at `t.TempDir()` so `run`
   never writes `skill-wiz-report.html` into the repo.
+- `main.policyDirectory` — where an undeclared policy file is discovered; `TestMain` points it at an
+  empty temporary directory so the suite never picks up a `.skill-wiz.yaml` from the repository.
 
 ## Working conventions
 

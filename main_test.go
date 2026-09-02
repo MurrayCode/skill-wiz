@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/murraycode/skill-wiz/analyse"
+	"github.com/murraycode/skill-wiz/policy"
 	"github.com/murraycode/skill-wiz/result"
 	"github.com/murraycode/skill-wiz/rules"
 	"github.com/murraycode/skill-wiz/scanner"
@@ -99,6 +100,42 @@ func TestParseOptions(t *testing.T) {
 				timeout:     analyse.DefaultTimeout,
 				failOn:      result.SeverityError,
 				concurrency: 3,
+			},
+		},
+		{
+			name: "summary is parsed",
+			args: []string{"--summary", "skill.md"},
+			want: options{
+				paths:       []string{"skill.md"},
+				model:       analyse.DefaultModel,
+				timeout:     analyse.DefaultTimeout,
+				failOn:      result.SeverityError,
+				concurrency: defaultConcurrency,
+				summary:     true,
+			},
+		},
+		{
+			name: "profile name is parsed and trimmed",
+			args: []string{"--profile", " ci ", "skill.md"},
+			want: options{
+				paths:       []string{"skill.md"},
+				model:       analyse.DefaultModel,
+				timeout:     analyse.DefaultTimeout,
+				failOn:      result.SeverityError,
+				concurrency: defaultConcurrency,
+				profile:     "ci",
+			},
+		},
+		{
+			name: "policy path is parsed and trimmed",
+			args: []string{"--policy", " ./team.yaml ", "skill.md"},
+			want: options{
+				paths:       []string{"skill.md"},
+				model:       analyse.DefaultModel,
+				timeout:     analyse.DefaultTimeout,
+				failOn:      result.SeverityError,
+				concurrency: defaultConcurrency,
+				policy:      "./team.yaml",
 			},
 		},
 		{
@@ -474,7 +511,19 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 
-	os.Exit(m.Run())
+	// Policy discovery must not depend on whether the repository happens to
+	// hold a .skill-wiz.yaml. Point it at an empty directory for the whole
+	// package; the tests that care about discovery override it themselves.
+	directory, err := os.MkdirTemp("", "skill-wiz-policy")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "create policy discovery directory: %v\n", err)
+		os.Exit(1)
+	}
+	policyDirectory = func() (string, error) { return directory, nil }
+
+	code := m.Run()
+	os.RemoveAll(directory)
+	os.Exit(code)
 }
 
 func TestRun(t *testing.T) {
@@ -548,7 +597,7 @@ func TestRun(t *testing.T) {
 			wantCode:    exitClean,
 			wantAnalyze: true,
 			rules: []rules.Rule{
-				rules.RuleFunc(func(*skill.Skill) []result.Finding {
+				rules.RuleFunc{Checker: func(*skill.Skill) []result.Finding {
 					return []result.Finding{{
 						Source:   result.SourceRule,
 						Category: result.Category("shell"),
@@ -556,7 +605,7 @@ func TestRun(t *testing.T) {
 						Message:  "shell execution found",
 						Evidence: result.Evidence{Summary: "bash command in body"},
 					}}
-				}),
+				}},
 			},
 			analyzer: scanner.AnalyzerFunc(func(*skill.Skill) (result.Result, error) {
 				return result.NewResult(result.Finding{
@@ -1627,5 +1676,713 @@ func TestRunRejectsInvalidConcurrency(t *testing.T) {
 				t.Fatalf("stderr reported the error %d times, want 1: %q", got, stderr.String())
 			}
 		})
+	}
+}
+
+func TestRunWithPolicy(t *testing.T) {
+	const hiddenBashSkill = "examples/HIDDENBASHSKILL.md"
+	const scriptFinding = "skill references local shell script execution"
+	const mismatchFinding = "skill instructions diverge from declared purpose"
+
+	tests := []struct {
+		name        string
+		policy      string
+		discovered  bool
+		explicit    string
+		wantCode    int
+		wantOutput  []string
+		wantMissing []string
+	}{
+		{
+			name:       "no policy leaves the corpus findings unchanged",
+			wantCode:   exitFindings,
+			wantOutput: []string{scriptFinding, mismatchFinding},
+		},
+		{
+			name:        "an explicit policy can disable a rule",
+			policy:      "rules:\n  shell-script:\n    enabled: false\n",
+			wantCode:    exitClean,
+			wantOutput:  []string{mismatchFinding},
+			wantMissing: []string{scriptFinding},
+		},
+		{
+			name:        "a policy in the working directory is discovered",
+			policy:      "rules:\n  shell-script:\n    enabled: false\n",
+			discovered:  true,
+			wantCode:    exitClean,
+			wantOutput:  []string{mismatchFinding},
+			wantMissing: []string{scriptFinding},
+		},
+		{
+			name:       "a policy that enables a rule explicitly changes nothing",
+			policy:     "rules:\n  shell-script:\n    enabled: true\n",
+			wantCode:   exitFindings,
+			wantOutput: []string{scriptFinding, mismatchFinding},
+		},
+		{
+			name:        "require naming an unknown rule fails the run",
+			policy:      "require:\n  - shell-scrpt\n",
+			wantCode:    exitFailure,
+			wantOutput:  []string{`require lists unknown rule "shell-scrpt"`},
+			wantMissing: []string{scriptFinding, mismatchFinding},
+		},
+		{
+			name:        "a rules entry naming an unknown rule fails the run",
+			policy:      "rules:\n  shell-scrpt:\n    enabled: false\n",
+			wantCode:    exitFailure,
+			wantOutput:  []string{`rules names unknown rule "shell-scrpt"`},
+			wantMissing: []string{scriptFinding},
+		},
+		{
+			name:        "a malformed policy fails the run",
+			policy:      "rules: [not a mapping\n",
+			wantCode:    exitFailure,
+			wantOutput:  []string{"parse policy"},
+			wantMissing: []string{scriptFinding},
+		},
+		{
+			name:        "an explicit policy that does not exist fails the run",
+			explicit:    "no-such-policy.yaml",
+			wantCode:    exitFailure,
+			wantOutput:  []string{"read policy no-such-policy.yaml"},
+			wantMissing: []string{scriptFinding},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+
+			reportDestination := filepath.Join(t.TempDir(), "skill-wiz-report.html")
+			originalReportPath := reportPath
+			reportPath = func() (string, error) { return reportDestination, nil }
+			originalPolicyDirectory := policyDirectory
+			defer func() {
+				reportPath = originalReportPath
+				policyDirectory = originalPolicyDirectory
+			}()
+
+			args := []string{hiddenBashSkill}
+			if tt.policy != "" {
+				directory := t.TempDir()
+				path := filepath.Join(directory, policy.FileName)
+				if err := os.WriteFile(path, []byte(tt.policy), 0o644); err != nil {
+					t.Fatalf("os.WriteFile() error = %v", err)
+				}
+				if tt.discovered {
+					policyDirectory = func() (string, error) { return directory, nil }
+				} else {
+					args = []string{"--policy", path, hiddenBashSkill}
+				}
+			}
+			if tt.explicit != "" {
+				args = []string{"--policy", tt.explicit, hiddenBashSkill}
+			}
+
+			gotCode := run(args, &stdout, &stderr, false)
+
+			if gotCode != tt.wantCode {
+				t.Fatalf("run() code = %d, want %d", gotCode, tt.wantCode)
+			}
+
+			combined := stdout.String() + stderr.String()
+			for _, want := range tt.wantOutput {
+				if !strings.Contains(combined, want) {
+					t.Fatalf("run() output = %q, want substring %q", combined, want)
+				}
+			}
+			for _, missing := range tt.wantMissing {
+				if strings.Contains(combined, missing) {
+					t.Fatalf("run() output = %q, want no substring %q", combined, missing)
+				}
+			}
+		})
+	}
+}
+
+func TestRunReportsAPolicyFailureOnce(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, policy.FileName)
+	if err := os.WriteFile(path, []byte("rules: [not a mapping\n"), 0o644); err != nil {
+		t.Fatalf("os.WriteFile() error = %v", err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	if got := run([]string{"--policy", path, "examples/HIDDENBASHSKILL.md"}, &stdout, &stderr, false); got != exitFailure {
+		t.Fatalf("run() code = %d, want %d", got, exitFailure)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("run() stdout = %q, want empty", stdout.String())
+	}
+	if count := strings.Count(stderr.String(), path); count != 1 {
+		t.Fatalf("run() stderr named the policy %d times, want 1:\n%s", count, stderr.String())
+	}
+}
+
+func TestEnabledRules(t *testing.T) {
+	all := rules.Default()
+
+	tests := []struct {
+		name     string
+		disabled []string
+		want     []string
+	}{
+		{
+			name: "no policy keeps every rule in order",
+			want: rules.IDs(all),
+		},
+		{
+			name:     "a disabled rule is dropped and the rest keep their order",
+			disabled: []string{"shell-script", "unrelated-url"},
+			want:     []string{"empty-body", "shell-command", "description-mismatch"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var active policy.Policy
+			if len(tt.disabled) > 0 {
+				directory := t.TempDir()
+				document := "rules:\n"
+				for _, id := range tt.disabled {
+					document += "  " + id + ":\n    enabled: false\n"
+				}
+				path := filepath.Join(directory, policy.FileName)
+				if err := os.WriteFile(path, []byte(document), 0o644); err != nil {
+					t.Fatalf("os.WriteFile() error = %v", err)
+				}
+
+				loaded, err := policy.Load(path)
+				if err != nil {
+					t.Fatalf("policy.Load() error = %v", err)
+				}
+				active = loaded
+			}
+
+			got := rules.IDs(enabledRules(all, active))
+
+			if len(got) != len(tt.want) {
+				t.Fatalf("enabledRules() = %v, want %v", got, tt.want)
+			}
+			for i, want := range tt.want {
+				if got[i] != want {
+					t.Fatalf("enabledRules()[%d] = %q, want %q", i, got[i], want)
+				}
+			}
+		})
+	}
+}
+
+func TestRunWithPolicyProfiles(t *testing.T) {
+	const document = `rules:
+  shell-script:
+    enabled: false
+profiles:
+  ci:
+    rules:
+      shell-script:
+        enabled: true
+  local:
+    rules:
+      shell-script:
+        enabled: false
+      description-mismatch:
+        enabled: false
+`
+	const scriptFinding = "skill references local shell script execution"
+	const mismatchFinding = "skill instructions diverge from declared purpose"
+
+	tests := []struct {
+		name        string
+		profile     string
+		wantCode    int
+		wantOutput  []string
+		wantMissing []string
+	}{
+		{
+			name:        "no profile uses the base policy",
+			wantCode:    exitClean,
+			wantOutput:  []string{mismatchFinding},
+			wantMissing: []string{scriptFinding},
+		},
+		{
+			name:       "the ci profile re-enables the rule the base disables",
+			profile:    "ci",
+			wantCode:   exitFindings,
+			wantOutput: []string{scriptFinding, mismatchFinding},
+		},
+		{
+			name:        "the local profile disables both rules",
+			profile:     "local",
+			wantCode:    exitClean,
+			wantMissing: []string{scriptFinding, mismatchFinding},
+		},
+		{
+			name:        "an unknown profile fails the run and lists the ones that exist",
+			profile:     "staging",
+			wantCode:    exitFailure,
+			wantOutput:  []string{`unknown profile "staging" (available profiles: ci, local)`},
+			wantMissing: []string{scriptFinding, mismatchFinding},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+
+			reportDestination := filepath.Join(t.TempDir(), "skill-wiz-report.html")
+			originalReportPath := reportPath
+			reportPath = func() (string, error) { return reportDestination, nil }
+			defer func() { reportPath = originalReportPath }()
+
+			path := filepath.Join(t.TempDir(), policy.FileName)
+			if err := os.WriteFile(path, []byte(document), 0o644); err != nil {
+				t.Fatalf("os.WriteFile() error = %v", err)
+			}
+
+			args := []string{"--policy", path}
+			if tt.profile != "" {
+				args = append(args, "--profile", tt.profile)
+			}
+			args = append(args, "examples/HIDDENBASHSKILL.md")
+
+			gotCode := run(args, &stdout, &stderr, false)
+
+			if gotCode != tt.wantCode {
+				t.Fatalf("run() code = %d, want %d", gotCode, tt.wantCode)
+			}
+
+			combined := stdout.String() + stderr.String()
+			for _, want := range tt.wantOutput {
+				if !strings.Contains(combined, want) {
+					t.Fatalf("run() output = %q, want substring %q", combined, want)
+				}
+			}
+			for _, missing := range tt.wantMissing {
+				if strings.Contains(combined, missing) {
+					t.Fatalf("run() output = %q, want no substring %q", combined, missing)
+				}
+			}
+		})
+	}
+}
+
+func TestRunRejectsAProfileWithoutAPolicy(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	got := run([]string{"--profile", "ci", "examples/CLEANSKILL.md"}, &stdout, &stderr, false)
+
+	if got != exitFailure {
+		t.Fatalf("run() code = %d, want %d", got, exitFailure)
+	}
+	if !strings.Contains(stderr.String(), `profile "ci" was requested but no policy file was found`) {
+		t.Fatalf("run() stderr = %q, want it to explain that no policy file was found", stderr.String())
+	}
+}
+
+func TestRunWithSeverityOverrides(t *testing.T) {
+	const scriptFinding = "skill references local shell script execution"
+	const mismatchFinding = "skill instructions diverge from declared purpose"
+
+	tests := []struct {
+		name        string
+		policy      string
+		wantCode    int
+		wantOutput  []string
+		wantMissing []string
+		wantJSON    []jsonFinding
+	}{
+		{
+			name:     "a severity can be lowered below the gate",
+			policy:   "rules:\n  shell-script:\n    severity: info\n",
+			wantCode: exitClean,
+			wantOutput: []string{
+				"[info] shell (rule): " + scriptFinding + " (severity overridden from error)",
+			},
+			wantJSON: []jsonFinding{
+				{Source: "rule", Category: "shell", Severity: "info", Message: scriptFinding, Evidence: "./scripts/racing.sh", OverriddenFrom: "error"},
+				{Source: "rule", Category: "mismatch", Severity: "warning", Message: mismatchFinding, Evidence: "description keywords [allows date find information racing] conflict with instruction section [following format information return]"},
+			},
+		},
+		{
+			name:     "a severity can be raised above the gate",
+			policy:   "rules:\n  description-mismatch:\n    severity: error\n",
+			wantCode: exitFindings,
+			wantOutput: []string{
+				"[error] mismatch (rule): " + mismatchFinding + " (severity overridden from warning)",
+			},
+		},
+		{
+			name:        "off suppresses the finding while the rule still runs",
+			policy:      "rules:\n  shell-script:\n    severity: off\n",
+			wantCode:    exitClean,
+			wantOutput:  []string{mismatchFinding},
+			wantMissing: []string{scriptFinding},
+			wantJSON: []jsonFinding{
+				{Source: "rule", Category: "mismatch", Severity: "warning", Message: mismatchFinding, Evidence: "description keywords [allows date find information racing] conflict with instruction section [following format information return]"},
+			},
+		},
+		{
+			name:        "no override leaves the default severities alone",
+			policy:      "rules:\n  unrelated-url:\n    enabled: false\n",
+			wantCode:    exitFindings,
+			wantOutput:  []string{"[error] shell (rule): " + scriptFinding},
+			wantMissing: []string{"overridden"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), policy.FileName)
+			if err := os.WriteFile(path, []byte(tt.policy), 0o644); err != nil {
+				t.Fatalf("os.WriteFile() error = %v", err)
+			}
+
+			reportDestination := filepath.Join(t.TempDir(), "skill-wiz-report.html")
+			originalReportPath := reportPath
+			reportPath = func() (string, error) { return reportDestination, nil }
+			defer func() { reportPath = originalReportPath }()
+
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+
+			gotCode := run([]string{"--policy", path, "examples/HIDDENBASHSKILL.md"}, &stdout, &stderr, false)
+
+			if gotCode != tt.wantCode {
+				t.Fatalf("run() code = %d, want %d", gotCode, tt.wantCode)
+			}
+			combined := stdout.String() + stderr.String()
+			for _, want := range tt.wantOutput {
+				if !strings.Contains(combined, want) {
+					t.Fatalf("run() output = %q, want substring %q", combined, want)
+				}
+			}
+			for _, missing := range tt.wantMissing {
+				if strings.Contains(combined, missing) {
+					t.Fatalf("run() output = %q, want no substring %q", combined, missing)
+				}
+			}
+
+			if tt.wantJSON == nil {
+				return
+			}
+
+			var jsonOut bytes.Buffer
+			var jsonErr bytes.Buffer
+			if got := run([]string{"--json", "--policy", path, "examples/HIDDENBASHSKILL.md"}, &jsonOut, &jsonErr, false); got != tt.wantCode {
+				t.Fatalf("run(--json) code = %d, want %d", got, tt.wantCode)
+			}
+
+			var decoded jsonReport
+			if err := json.Unmarshal(jsonOut.Bytes(), &decoded); err != nil {
+				t.Fatalf("json.Unmarshal() error = %v, output = %q", err, jsonOut.String())
+			}
+			if !reflect.DeepEqual(decoded.Findings, tt.wantJSON) {
+				t.Fatalf("run(--json) findings = %#v, want %#v", decoded.Findings, tt.wantJSON)
+			}
+
+			page, err := os.ReadFile(reportDestination)
+			if err != nil {
+				t.Fatalf("os.ReadFile(report) error = %v", err)
+			}
+			for _, finding := range tt.wantJSON {
+				if finding.OverriddenFrom == "" {
+					continue
+				}
+				if !strings.Contains(string(page), "was "+finding.OverriddenFrom) {
+					t.Fatalf("report does not record the original severity %q", finding.OverriddenFrom)
+				}
+			}
+		})
+	}
+}
+
+func TestRunSummary(t *testing.T) {
+	tests := []struct {
+		name        string
+		args        []string
+		wantOutput  []string
+		wantMissing []string
+	}{
+		{
+			name: "a single-file run prints the breakdown too",
+			args: []string{"--summary", "examples/HIDDENBASHSKILL.md"},
+			wantOutput: []string{
+				"\nSummary\n",
+				"Files: 1 scanned · 0 clean · 1 flagged · 0 failed",
+				"Severity: 1 error, 1 warning",
+				"Category: 1 mismatch, 1 shell",
+				"Source: 2 rule",
+			},
+		},
+		{
+			name: "the summary follows the multi-file tally",
+			args: []string{"--summary", "examples"},
+			wantOutput: []string{
+				"3 files scanned · 1 clean · 2 flagged · 4 findings",
+				"\nSummary\n",
+				"Files: 3 scanned · 1 clean · 2 flagged · 0 failed",
+			},
+		},
+		{
+			name: "without the flag nothing is added",
+			args: []string{"examples/HIDDENBASHSKILL.md"},
+			// The report path is a temporary directory named after the test, so
+			// match the summary heading as it is actually printed rather than
+			// the bare word.
+			wantMissing: []string{"\nSummary\n", "Files:"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reportDestination := filepath.Join(t.TempDir(), "skill-wiz-report.html")
+			originalReportPath := reportPath
+			reportPath = func() (string, error) { return reportDestination, nil }
+			defer func() { reportPath = originalReportPath }()
+
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+
+			run(tt.args, &stdout, &stderr, false)
+
+			for _, want := range tt.wantOutput {
+				if !strings.Contains(stdout.String(), want) {
+					t.Fatalf("run() stdout = %q, want substring %q", stdout.String(), want)
+				}
+			}
+			for _, missing := range tt.wantMissing {
+				if strings.Contains(stdout.String(), missing) {
+					t.Fatalf("run() stdout = %q, want no substring %q", stdout.String(), missing)
+				}
+			}
+		})
+	}
+}
+
+func TestRunSummaryJSON(t *testing.T) {
+	tests := []struct {
+		name       string
+		args       []string
+		wantObject bool
+	}{
+		{
+			name:       "one file with --summary is the summary object",
+			args:       []string{"--json", "--summary", "examples/HIDDENBASHSKILL.md"},
+			wantObject: true,
+		},
+		{
+			name:       "several files with --summary is the same object",
+			args:       []string{"--json", "--summary", "examples"},
+			wantObject: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reportDestination := filepath.Join(t.TempDir(), "skill-wiz-report.html")
+			originalReportPath := reportPath
+			reportPath = func() (string, error) { return reportDestination, nil }
+			defer func() { reportPath = originalReportPath }()
+
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+
+			run(tt.args, &stdout, &stderr, false)
+
+			var decoded jsonRun
+			if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
+				t.Fatalf("json.Unmarshal() error = %v, output = %q", err, stdout.String())
+			}
+			if len(decoded.Results) != decoded.Summary.FilesScanned {
+				t.Fatalf("len(results) = %d, want summary.files_scanned = %d", len(decoded.Results), decoded.Summary.FilesScanned)
+			}
+
+			// The summary must agree with the detail it sits beside.
+			findings := 0
+			for _, entry := range decoded.Results {
+				findings += len(entry.Findings)
+			}
+			if decoded.Summary.Findings != findings {
+				t.Fatalf("summary.findings = %d, want %d", decoded.Summary.Findings, findings)
+			}
+			total := 0
+			for _, row := range decoded.Summary.ByCategory {
+				total += row.Count
+			}
+			if total != findings {
+				t.Fatalf("by_category totals %d, want %d", total, findings)
+			}
+		})
+	}
+}
+
+func TestRunDefaultJSONIsUnchangedBySummarySupport(t *testing.T) {
+	tests := []struct {
+		name  string
+		args  []string
+		first byte
+	}{
+		{name: "one file stays an object", args: []string{"--json", "examples/HIDDENBASHSKILL.md"}, first: '{'},
+		{name: "several files stay an array", args: []string{"--json", "examples"}, first: '['},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reportDestination := filepath.Join(t.TempDir(), "skill-wiz-report.html")
+			originalReportPath := reportPath
+			reportPath = func() (string, error) { return reportDestination, nil }
+			defer func() { reportPath = originalReportPath }()
+
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+
+			run(tt.args, &stdout, &stderr, false)
+
+			trimmed := strings.TrimSpace(stdout.String())
+			if trimmed == "" || trimmed[0] != tt.first {
+				t.Fatalf("run(--json) output starts with %q, want %q", trimmed[:1], string(tt.first))
+			}
+			if strings.Contains(trimmed, `"summary"`) {
+				t.Fatalf("run(--json) output carries a summary without --summary: %s", trimmed)
+			}
+		})
+	}
+}
+
+func TestRunSummaryCountsFailedFilesAndOmitsThemFromResults(t *testing.T) {
+	directory := t.TempDir()
+	if err := os.WriteFile(filepath.Join(directory, "good.md"), []byte("---\nname: good skill\ndescription: returns hello world\n---\nSay hello world."), 0o644); err != nil {
+		t.Fatalf("os.WriteFile() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "bad.md"), []byte("this file has no frontmatter"), 0o644); err != nil {
+		t.Fatalf("os.WriteFile() error = %v", err)
+	}
+
+	reportDestination := filepath.Join(t.TempDir(), "skill-wiz-report.html")
+	originalReportPath := reportPath
+	reportPath = func() (string, error) { return reportDestination, nil }
+	defer func() { reportPath = originalReportPath }()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	if got := run([]string{"--json", "--summary", directory}, &stdout, &stderr, false); got != exitFailure {
+		t.Fatalf("run() code = %d, want %d", got, exitFailure)
+	}
+
+	var decoded jsonRun
+	if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v, output = %q", err, stdout.String())
+	}
+	if decoded.Summary.FilesFailed != 1 {
+		t.Fatalf("summary.files_failed = %d, want 1", decoded.Summary.FilesFailed)
+	}
+	if decoded.Summary.FilesScanned != 1 {
+		t.Fatalf("summary.files_scanned = %d, want 1", decoded.Summary.FilesScanned)
+	}
+	if len(decoded.Results) != 1 {
+		t.Fatalf("len(results) = %d, want 1", len(decoded.Results))
+	}
+	if strings.Contains(stdout.String(), "bad.md") {
+		t.Fatalf("run(--json) results include the file that failed to scan: %s", stdout.String())
+	}
+
+	page, err := os.ReadFile(reportDestination)
+	if err != nil {
+		t.Fatalf("os.ReadFile(report) error = %v", err)
+	}
+	if !strings.Contains(string(page), "<b>1</b> failed") {
+		t.Fatal("report does not record the file that failed to scan")
+	}
+}
+
+func TestRunReportAlwaysCarriesTheSummary(t *testing.T) {
+	reportDestination := filepath.Join(t.TempDir(), "skill-wiz-report.html")
+	originalReportPath := reportPath
+	reportPath = func() (string, error) { return reportDestination, nil }
+	defer func() { reportPath = originalReportPath }()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	// No --summary flag: the report shows the run summary regardless, and for a
+	// single-file run as much as for a directory.
+	run([]string{"examples/HIDDENBASHSKILL.md"}, &stdout, &stderr, false)
+
+	page, err := os.ReadFile(reportDestination)
+	if err != nil {
+		t.Fatalf("os.ReadFile(report) error = %v", err)
+	}
+	for _, want := range []string{"Run summary", "<b>1</b> scanned", "<b>2</b> findings", "1 shell", "1 mismatch", "2 rule"} {
+		if !strings.Contains(string(page), want) {
+			t.Fatalf("report missing %q", want)
+		}
+	}
+}
+
+func TestRunRejectsADirectoryNamedLikeThePolicy(t *testing.T) {
+	// A misconfigured .skill-wiz.yaml must stop the run rather than quietly
+	// producing a policy-free one: the whole point of the file is that what it
+	// says is enforced.
+	directory := t.TempDir()
+	path := filepath.Join(directory, policy.FileName)
+	if err := os.Mkdir(path, 0o755); err != nil {
+		t.Fatalf("os.Mkdir() error = %v", err)
+	}
+
+	originalPolicyDirectory := policyDirectory
+	policyDirectory = func() (string, error) { return directory, nil }
+	defer func() { policyDirectory = originalPolicyDirectory }()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	if got := run([]string{"examples/HIDDENBASHSKILL.md"}, &stdout, &stderr, false); got != exitFailure {
+		t.Fatalf("run() code = %d, want %d", got, exitFailure)
+	}
+	if !strings.Contains(stderr.String(), path) {
+		t.Fatalf("run() stderr = %q, want the policy path in the message", stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("run() stdout = %q, want empty", stdout.String())
+	}
+}
+
+func TestRunSummaryExcludesSuppressedFindings(t *testing.T) {
+	// severity: off drops a finding before anything counts it, so the summary
+	// figures agree with the findings printed above them rather than with what
+	// the rules found.
+	path := filepath.Join(t.TempDir(), policy.FileName)
+	if err := os.WriteFile(path, []byte("rules:\n  shell-script:\n    severity: off\n"), 0o644); err != nil {
+		t.Fatalf("os.WriteFile() error = %v", err)
+	}
+
+	reportDestination := filepath.Join(t.TempDir(), "skill-wiz-report.html")
+	originalReportPath := reportPath
+	reportPath = func() (string, error) { return reportDestination, nil }
+	defer func() { reportPath = originalReportPath }()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	run([]string{"--summary", "--policy", path, "examples/HIDDENBASHSKILL.md"}, &stdout, &stderr, false)
+
+	for _, want := range []string{
+		"Files: 1 scanned · 0 clean · 1 flagged · 0 failed",
+		"Severity: 1 warning",
+		"Category: 1 mismatch",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("run() stdout = %q, want substring %q", stdout.String(), want)
+		}
+	}
+	if strings.Contains(stdout.String(), "shell") {
+		t.Fatalf("run() stdout counts a suppressed finding: %q", stdout.String())
 	}
 }

@@ -27,29 +27,77 @@ var urlPattern = regexp.MustCompile(`https?://[^\s<>()]+`)
 var localShellScriptPattern = regexp.MustCompile(`(?i)(?:execute|run|invoke|launch)[^\n]*?(\./[^\s"'<>]+\.sh)`)
 var shellCommandPattern = regexp.MustCompile(`(?i)\b(?:bash|sh)\b(?:\s+-[a-z]+)?(?:\s+'[^'\n]+'|\s+"[^"\n]+"|\s+\./[^\s"'<>]+|\s+[^\s"'<>]+)?`)
 
+// Rule identifiers. These are a public contract in the same way the JSON field
+// names are: a policy file names a rule by its ID, so renaming one silently
+// changes what every policy that mentions it enforces. Add IDs; do not rename
+// them.
+const (
+	IDEmptyBody           = "empty-body"
+	IDShellScript         = "shell-script"
+	IDShellCommand        = "shell-command"
+	IDUnrelatedURL        = "unrelated-url"
+	IDDescriptionMismatch = "description-mismatch"
+)
+
+// Rule is one deterministic check with a stable identity.
 type Rule interface {
+	// ID names the rule for configuration. See the ID constants above.
+	ID() string
 	Check(*skill.Skill) []result.Finding
 }
 
-type RuleFunc func(*skill.Skill) []result.Finding
+// RuleFunc adapts a plain check function to the Rule contract by pairing it
+// with the identifier policy refers to.
+type RuleFunc struct {
+	RuleID  string
+	Checker func(*skill.Skill) []result.Finding
+}
+
+func (f RuleFunc) ID() string {
+	return f.RuleID
+}
 
 func (f RuleFunc) Check(s *skill.Skill) []result.Finding {
-	return f(s)
+	if f.Checker == nil {
+		return nil
+	}
+
+	return f.Checker(s)
 }
 
 func Default() []Rule {
 	return []Rule{
-		RuleFunc(emptyBodyRule),
-		RuleFunc(shellExecutionRule),
-		RuleFunc(unrelatedURLRule),
-		RuleFunc(descriptionMismatchRule),
+		RuleFunc{RuleID: IDEmptyBody, Checker: emptyBodyRule},
+		RuleFunc{RuleID: IDShellScript, Checker: shellScriptRule},
+		RuleFunc{RuleID: IDShellCommand, Checker: shellCommandRule},
+		RuleFunc{RuleID: IDUnrelatedURL, Checker: unrelatedURLRule},
+		RuleFunc{RuleID: IDDescriptionMismatch, Checker: descriptionMismatchRule},
 	}
 }
 
+// IDs lists the identifiers of a rule set in order, which is what a policy is
+// validated against.
+func IDs(ruleSet []Rule) []string {
+	ids := make([]string, 0, len(ruleSet))
+	for _, rule := range ruleSet {
+		ids = append(ids, rule.ID())
+	}
+
+	return ids
+}
+
+// Scan runs every rule in order and stamps each finding with the ID of the rule
+// that produced it. Stamping here rather than in the rules themselves means a
+// rule cannot forget to, and cannot claim an identity other than the one it was
+// registered under.
 func Scan(s *skill.Skill, rules ...Rule) result.Result {
 	findings := make([]result.Finding, 0)
 	for _, rule := range rules {
-		findings = append(findings, rule.Check(s)...)
+		id := rule.ID()
+		for _, finding := range rule.Check(s) {
+			finding.RuleID = id
+			findings = append(findings, finding)
+		}
 	}
 
 	return result.NewResult(findings...)
@@ -263,20 +311,41 @@ func hasOverlap(left map[string]struct{}, right map[string]struct{}) bool {
 	return false
 }
 
-func shellExecutionRule(s *skill.Skill) []result.Finding {
+func shellScriptRule(s *skill.Skill) []result.Finding {
 	body := strings.TrimSpace(s.Body)
 	if body == "" {
 		return nil
 	}
 
-	if matches := localShellScriptPattern.FindStringSubmatch(body); len(matches) > 1 {
-		return []result.Finding{{
-			Source:   result.SourceRule,
-			Category: result.Category("shell"),
-			Severity: result.SeverityError,
-			Message:  "skill references local shell script execution",
-			Evidence: result.Evidence{Summary: matches[1]},
-		}}
+	matches := localShellScriptPattern.FindStringSubmatch(body)
+	if len(matches) < 2 {
+		return nil
+	}
+
+	return []result.Finding{{
+		Source:   result.SourceRule,
+		Category: result.Category("shell"),
+		Severity: result.SeverityError,
+		Message:  "skill references local shell script execution",
+		Evidence: result.Evidence{Summary: matches[1]},
+	}}
+}
+
+// shellCommandRule reports a loose bash or sh mention. It stands down entirely
+// on a body that names a local script, because shellScriptRule has already
+// reported that body at error severity and the line naming the script usually
+// matches this pattern too — reporting it twice would double-count one problem.
+// Deferring on the pattern rather than on whether the script rule ran keeps the
+// two independent: disabling shell-script through policy removes that finding
+// without a warning appearing in its place.
+func shellCommandRule(s *skill.Skill) []result.Finding {
+	body := strings.TrimSpace(s.Body)
+	if body == "" {
+		return nil
+	}
+
+	if localShellScriptPattern.MatchString(body) {
+		return nil
 	}
 
 	for _, line := range strings.Split(body, "\n") {
