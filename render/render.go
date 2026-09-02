@@ -207,3 +207,53 @@ func truncateEvidence(summary string) string {
 func cleanMessage() string {
 	return "THIS SKILL APPEARS TO BE CLEAN, PLEASE MANUALLY VERIFY TO BE SURE"
 }
+
+// WithSummary appends the run breakdown that --summary asks for to
+// already-rendered scan output.
+//
+// It takes the rendered text rather than returning a standalone block because
+// one case ends mid-line: a single clean file's verdict carries no newline of
+// its own, and the summary must not run on from it.
+func WithSummary(rendered string, summary result.Summary) string {
+	if rendered != "" && !strings.HasSuffix(rendered, "\n") {
+		rendered += "\n"
+	}
+
+	return rendered + summaryBlock(summary)
+}
+
+// summaryBlock is the run-level aggregate. The multi-file tally above it stays
+// as it was; this adds the category and source breakdown a repository-wide scan
+// needs, and repeats the file and severity figures so that a single-file run —
+// which prints no tally — still gets a complete summary.
+func summaryBlock(summary result.Summary) string {
+	var builder strings.Builder
+	builder.WriteString("\nSummary\n")
+	fmt.Fprintf(&builder, "Files: %d scanned · %d clean · %d flagged · %d failed\n",
+		summary.FilesScanned, summary.FilesClean, summary.FilesFlagged, summary.FilesFailed)
+
+	for _, breakdown := range []struct {
+		label string
+		rows  []result.Count
+	}{
+		{label: "Severity", rows: summary.BySeverity},
+		{label: "Category", rows: summary.ByCategory},
+		{label: "Source", rows: summary.BySource},
+	} {
+		if len(breakdown.rows) == 0 {
+			continue
+		}
+		fmt.Fprintf(&builder, "%s: %s\n", breakdown.label, countRow(breakdown.rows))
+	}
+
+	return builder.String()
+}
+
+func countRow(rows []result.Count) string {
+	parts := make([]string, 0, len(rows))
+	for _, row := range rows {
+		parts = append(parts, fmt.Sprintf("%d %s", row.Count, row.Name))
+	}
+
+	return strings.Join(parts, ", ")
+}

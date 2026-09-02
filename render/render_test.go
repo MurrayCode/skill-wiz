@@ -493,3 +493,51 @@ func TestRenderResultMarksAnOverriddenSeverity(t *testing.T) {
 		})
 	}
 }
+
+func TestWithSummary(t *testing.T) {
+	tests := []struct {
+		name     string
+		rendered string
+		summary  result.Summary
+		want     string
+	}{
+		{
+			name:     "a clean single-file run is closed before the summary",
+			rendered: "THIS SKILL APPEARS TO BE CLEAN, PLEASE MANUALLY VERIFY TO BE SURE",
+			summary:  result.Summarize([]result.Result{result.NewCleanResult()}, 0),
+			want: "THIS SKILL APPEARS TO BE CLEAN, PLEASE MANUALLY VERIFY TO BE SURE\n" +
+				"\nSummary\nFiles: 1 scanned · 1 clean · 0 flagged · 0 failed\n",
+		},
+		{
+			name:     "breakdowns follow the file figures",
+			rendered: "already rendered\n",
+			summary: result.Summarize([]result.Result{
+				result.NewResult(
+					result.Finding{Source: result.SourceRule, Category: result.Category("shell"), Severity: result.SeverityError},
+					result.Finding{Source: result.SourceRule, Category: result.Category("shell"), Severity: result.SeverityWarning},
+				),
+				result.NewResult(result.Finding{Source: result.SourceAnalyzer, Category: result.Category("hidden"), Severity: result.SeverityWarning}),
+			}, 1),
+			want: "already rendered\n" +
+				"\nSummary\n" +
+				"Files: 2 scanned · 0 clean · 2 flagged · 1 failed\n" +
+				"Severity: 1 error, 2 warning\n" +
+				"Category: 2 shell, 1 hidden\n" +
+				"Source: 2 rule, 1 analyzer\n",
+		},
+		{
+			name:     "a run with no findings prints no breakdown lines",
+			rendered: "",
+			summary:  result.Summarize(nil, 0),
+			want:     "\nSummary\nFiles: 0 scanned · 0 clean · 0 flagged · 0 failed\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := WithSummary(tt.rendered, tt.summary); got != tt.want {
+				t.Fatalf("WithSummary() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

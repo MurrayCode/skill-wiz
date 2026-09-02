@@ -38,10 +38,21 @@ type Input struct {
 	AnalysisSkipped bool
 }
 
+// Run carries what the page needs about the run as a whole, beyond the
+// per-skill inputs. Only the facts this package cannot derive from the inputs
+// belong here: the summary itself is computed from the results being rendered,
+// so the figures on the page can never disagree with the findings under them.
+type Run struct {
+	// FilesFailed counts the files that could not be read, parsed, or scanned.
+	// They have no Input, so the page would otherwise have no way to say they
+	// existed.
+	FilesFailed int
+}
+
 // Write renders the report for a whole run and saves it to destination,
 // creating parent directories when they are missing.
-func Write(destination string, inputs ...Input) error {
-	page, err := Render(inputs...)
+func Write(destination string, run Run, inputs ...Input) error {
+	page, err := Render(run, inputs...)
 	if err != nil {
 		return err
 	}
@@ -60,13 +71,13 @@ func Write(destination string, inputs ...Input) error {
 
 // Render returns the full HTML document for a run. Every scanned skill lands on
 // the one page; which of them is on show is a reader-side choice.
-func Render(inputs ...Input) (string, error) {
+func Render(run Run, inputs ...Input) (string, error) {
 	if len(inputs) == 0 {
 		return "", errors.New("render report: no scans")
 	}
 
 	var buffer bytes.Buffer
-	if err := pageTemplate.Execute(&buffer, newPageView(inputs)); err != nil {
+	if err := pageTemplate.Execute(&buffer, newPageView(run, inputs)); err != nil {
 		return "", fmt.Errorf("render report: %w", err)
 	}
 
@@ -77,7 +88,27 @@ type pageView struct {
 	Title      string
 	SkillCount int
 	Multiple   bool
+	Summary    summaryView
 	Skills     []skillView
+}
+
+// summaryView is the run-level aggregate that heads the page. Unlike the
+// console breakdown it renders on every run, flag or not: this is the one
+// surface with room for it, and the page already covers the whole run.
+type summaryView struct {
+	FilesScanned int
+	FilesClean   int
+	FilesFlagged int
+	FilesFailed  int
+	Findings     int
+	BySeverity   []countView
+	ByCategory   []rowView
+	BySource     []rowView
+}
+
+type rowView struct {
+	Label string
+	Count int
 }
 
 type skillView struct {
@@ -113,13 +144,14 @@ type findingView struct {
 	OverriddenFrom string
 }
 
-func newPageView(inputs []Input) pageView {
+func newPageView(run Run, inputs []Input) pageView {
 	labels := pickerLabels(inputs)
 
 	page := pageView{
 		Title:      skillTitle(inputs[0]),
 		SkillCount: len(inputs),
 		Multiple:   len(inputs) > 1,
+		Summary:    newSummaryView(run, inputs),
 		Skills:     make([]skillView, 0, len(inputs)),
 	}
 	if page.Multiple {
@@ -161,6 +193,46 @@ func pickerLabels(inputs []Input) []string {
 	}
 
 	return labels
+}
+
+// newSummaryView aggregates the very results the page is about to show, so the
+// figures at the top and the cards below them are derived from one source.
+func newSummaryView(run Run, inputs []Input) summaryView {
+	results := make([]result.Result, 0, len(inputs))
+	for _, input := range inputs {
+		results = append(results, input.Result)
+	}
+
+	summary := result.Summarize(results, run.FilesFailed)
+
+	view := summaryView{
+		FilesScanned: summary.FilesScanned,
+		FilesClean:   summary.FilesClean,
+		FilesFlagged: summary.FilesFlagged,
+		FilesFailed:  summary.FilesFailed,
+		Findings:     summary.Findings,
+		BySeverity:   make([]countView, 0, len(summary.BySeverity)),
+		ByCategory:   rows(summary.ByCategory),
+		BySource:     rows(summary.BySource),
+	}
+	for _, count := range summary.BySeverity {
+		view.BySeverity = append(view.BySeverity, countView{
+			Severity: count.Name,
+			Label:    count.Name,
+			Count:    count.Count,
+		})
+	}
+
+	return view
+}
+
+func rows(counts []result.Count) []rowView {
+	views := make([]rowView, 0, len(counts))
+	for _, count := range counts {
+		views = append(views, rowView{Label: count.Name, Count: count.Count})
+	}
+
+	return views
 }
 
 func tally(count int) string {

@@ -2,6 +2,7 @@ package result
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -213,4 +214,98 @@ func findingKey(finding Finding) string {
 
 func normalizeFindingText(value string) string {
 	return strings.ToLower(strings.TrimSpace(value))
+}
+
+// Count is one row of a summary breakdown: a name and how many findings carried
+// it.
+type Count struct {
+	Name  string
+	Count int
+}
+
+// Summary aggregates a whole run. It counts what was reported, so findings a
+// policy switched off are absent from every figure here — they are not findings
+// any more by the time a Result reaches this package.
+type Summary struct {
+	FilesScanned int
+	FilesClean   int
+	FilesFlagged int
+	FilesFailed  int
+	Findings     int
+	BySeverity   []Count
+	ByCategory   []Count
+	BySource     []Count
+}
+
+// Summarize aggregates the results of a run.
+//
+// Files that failed to scan are passed in as a count rather than inferred:
+// this package knows nothing about paths or the filesystem, and teaching it
+// would couple the leaf package to the CLI. Every result handed in is a file
+// that was scanned.
+func Summarize(results []Result, filesFailed int) Summary {
+	summary := Summary{FilesScanned: len(results), FilesFailed: filesFailed}
+
+	severities := make(map[string]int)
+	categories := make(map[string]int)
+	sources := make(map[string]int)
+	for _, scanned := range results {
+		if scanned.Clean() {
+			summary.FilesClean++
+		} else {
+			summary.FilesFlagged++
+		}
+		for _, finding := range scanned.Findings {
+			summary.Findings++
+			severities[string(finding.Severity)]++
+			categories[string(finding.Category)]++
+			sources[string(finding.Source)]++
+		}
+	}
+
+	summary.BySeverity = severityCounts(severities)
+	summary.ByCategory = rankedCounts(categories)
+	summary.BySource = rankedCounts(sources)
+
+	return summary
+}
+
+// severityCounts lists the severities that occurred in the one order this
+// package recognises, most serious first, with anything unrecognised ranked
+// after them so a malformed finding never leads the breakdown.
+func severityCounts(counts map[string]int) []Count {
+	rows := make([]Count, 0, len(counts))
+	for _, severity := range severityOrder {
+		if count := counts[string(severity)]; count > 0 {
+			rows = append(rows, Count{Name: string(severity), Count: count})
+		}
+	}
+
+	unknown := make(map[string]int)
+	for name, count := range counts {
+		if !Known(Severity(name)) {
+			unknown[name] = count
+		}
+	}
+
+	return append(rows, rankedCounts(unknown)...)
+}
+
+// rankedCounts orders a breakdown by count descending, then name ascending, so
+// repeated runs produce the same rows in the same order and a diff of two runs
+// shows only what actually changed.
+func rankedCounts(counts map[string]int) []Count {
+	rows := make([]Count, 0, len(counts))
+	for name, count := range counts {
+		rows = append(rows, Count{Name: name, Count: count})
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Count != rows[j].Count {
+			return rows[i].Count > rows[j].Count
+		}
+
+		return rows[i].Name < rows[j].Name
+	})
+
+	return rows
 }

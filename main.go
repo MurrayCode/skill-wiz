@@ -87,6 +87,7 @@ type options struct {
 	concurrency int
 	policy      string
 	profile     string
+	summary     bool
 }
 
 func (o options) analyzerConfig() analyse.Config {
@@ -143,13 +144,14 @@ func run(args []string, stdout io.Writer, stderr io.Writer, terminal bool) int {
 	// order the workers finished, so console output, the report, the JSON array,
 	// the tally, and the stderr failures all stay deterministic.
 	scans := make([]fileScan, 0, len(files))
-	failed := false
+	failures := 0
 	for index, outcome := range outcomes {
 		if outcome.err != nil {
 			// One unreadable or unparseable file must not hide the rest: report
-			// it, remember the failure for the exit code, and carry on.
+			// it, count the failure for the exit code and the summary, and
+			// carry on.
 			fmt.Fprintln(stderr, scanError(files[index], outcome.err, len(files)))
-			failed = true
+			failures++
 			continue
 		}
 
@@ -159,28 +161,45 @@ func run(args []string, stdout io.Writer, stderr io.Writer, terminal bool) int {
 		return exitFailure
 	}
 
+	summary := result.Summarize(scanResults(scans), failures)
+
 	// One run, one report: every scanned skill lands on the same page.
-	destination := writeReport(scans, analysisSkipped, stderr)
+	destination := writeReport(scans, failures, analysisSkipped, stderr)
 
 	if opts.json {
-		rendered, err := renderJSON(jsonInputs(scans, destination, analysisSkipped))
+		rendered, err := renderRunJSON(jsonInputs(scans, destination, analysisSkipped), opts.summary, summary)
 		if err != nil {
 			fmt.Fprintf(stderr, "failed to render JSON output: %v\n", err)
 			return exitFailure
 		}
 
 		fmt.Fprintln(stdout, rendered)
-		return exitCode(scans, failed, opts.failOn)
+		return exitCode(scans, failures > 0, opts.failOn)
 	}
 
 	if analysisSkipped {
 		fmt.Fprint(stdout, render.AnalysisSkippedNote())
 	}
-	fmt.Fprint(stdout, render.Scans(renderInputs(scans), len(files), render.Style{Color: colorEnabled(terminal, opts.noColor)}))
+	rendered := render.Scans(renderInputs(scans), len(files), render.Style{Color: colorEnabled(terminal, opts.noColor)})
+	if opts.summary {
+		rendered = render.WithSummary(rendered, summary)
+	}
+	fmt.Fprint(stdout, rendered)
 	if destination != "" {
 		fmt.Fprint(stdout, renderReportPointer(destination))
 	}
-	return exitCode(scans, failed, opts.failOn)
+	return exitCode(scans, failures > 0, opts.failOn)
+}
+
+// scanResults is the run's results in file order, which is all the summary
+// needs — it knows nothing about paths.
+func scanResults(scans []fileScan) []result.Result {
+	results := make([]result.Result, 0, len(scans))
+	for _, scan := range scans {
+		results = append(results, scan.result)
+	}
+
+	return results
 }
 
 // exitCode maps a completed run onto its exit code. An operational failure
@@ -382,6 +401,7 @@ func parseOptions(args []string, stderr io.Writer) (options, error) {
 	concurrency := flags.Int("concurrency", defaultConcurrency, "how many files to scan at once; --timeout still bounds each analysis request individually")
 	policyPath := flags.String("policy", "", "path to a policy file; defaults to "+policy.FileName+" in the working directory when one is present")
 	profileName := flags.String("profile", "", "name of the policy profile to apply; the base policy is used when omitted")
+	summary := flags.Bool("summary", false, "add a run-level summary to the console output, and switch --json to the {summary, results} shape")
 
 	if err := flags.Parse(args); err != nil {
 		printUsage(flags, stderr)
@@ -418,6 +438,7 @@ func parseOptions(args []string, stderr io.Writer) (options, error) {
 		concurrency: *concurrency,
 		policy:      strings.TrimSpace(*policyPath),
 		profile:     strings.TrimSpace(*profileName),
+		summary:     *summary,
 	}, nil
 }
 
@@ -443,7 +464,7 @@ func printUsage(flags *flag.FlagSet, w io.Writer) {
 // writeReport saves the run's HTML report and returns where it landed, or ""
 // when it could not be written. A report that cannot be written is a warning,
 // not a scan failure: the console output already carries every finding.
-func writeReport(scans []fileScan, analysisSkipped bool, stderr io.Writer) string {
+func writeReport(scans []fileScan, filesFailed int, analysisSkipped bool, stderr io.Writer) string {
 	destination, err := reportPath()
 	if err != nil {
 		fmt.Fprintf(stderr, "failed to resolve HTML report path: %v\n", err)
@@ -462,7 +483,7 @@ func writeReport(scans []fileScan, analysisSkipped bool, stderr io.Writer) strin
 		})
 	}
 
-	if err := report.Write(destination, inputs...); err != nil {
+	if err := report.Write(destination, report.Run{FilesFailed: filesFailed}, inputs...); err != nil {
 		fmt.Fprintf(stderr, "failed to write HTML report: %v\n", err)
 		return ""
 	}
@@ -526,6 +547,31 @@ type jsonReport struct {
 	AnalysisSkipped bool `json:"analysis_skipped,omitempty"`
 }
 
+// jsonRun is the --summary payload: one object carrying the run summary and the
+// per-file results. results is always an array here, whatever the file count,
+// so a consumer that opts into this shape has one shape to parse rather than
+// two.
+type jsonRun struct {
+	Summary jsonSummary  `json:"summary"`
+	Results []jsonReport `json:"results"`
+}
+
+type jsonSummary struct {
+	FilesScanned int         `json:"files_scanned"`
+	FilesClean   int         `json:"files_clean"`
+	FilesFlagged int         `json:"files_flagged"`
+	FilesFailed  int         `json:"files_failed"`
+	Findings     int         `json:"findings"`
+	BySeverity   []jsonCount `json:"by_severity"`
+	ByCategory   []jsonCount `json:"by_category"`
+	BySource     []jsonCount `json:"by_source"`
+}
+
+type jsonCount struct {
+	Name  string `json:"name"`
+	Count int    `json:"count"`
+}
+
 type jsonSkill struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`
@@ -561,19 +607,65 @@ func jsonInputs(scans []fileScan, reportPath string, analysisSkipped bool) []jso
 	return inputs
 }
 
+// renderRunJSON picks the payload shape for a run. Without --summary it is the
+// contract it has always been, so anything already parsing this output keeps
+// working; with --summary it is one object carrying the summary and the results.
+// The default is deliberately not switched to the object form: an array has
+// nowhere to put a summary, and quietly changing the default would break
+// existing callers.
+func renderRunJSON(inputs []jsonInput, withSummary bool, summary result.Summary) (string, error) {
+	if withSummary {
+		return encodeJSON(jsonRun{Summary: newJSONSummary(summary), Results: jsonReports(inputs)})
+	}
+
+	return renderJSON(inputs)
+}
+
 // renderJSON encodes the scans. A single scan stays the object it has always
 // been; several scans become an array of that same object.
 func renderJSON(inputs []jsonInput) (string, error) {
-	reports := make([]jsonReport, 0, len(inputs))
-	for _, input := range inputs {
-		reports = append(reports, newJSONReport(input))
-	}
+	reports := jsonReports(inputs)
 
 	var payload any = reports
 	if len(reports) == 1 {
 		payload = reports[0]
 	}
 
+	return encodeJSON(payload)
+}
+
+func jsonReports(inputs []jsonInput) []jsonReport {
+	reports := make([]jsonReport, 0, len(inputs))
+	for _, input := range inputs {
+		reports = append(reports, newJSONReport(input))
+	}
+
+	return reports
+}
+
+func newJSONSummary(summary result.Summary) jsonSummary {
+	return jsonSummary{
+		FilesScanned: summary.FilesScanned,
+		FilesClean:   summary.FilesClean,
+		FilesFlagged: summary.FilesFlagged,
+		FilesFailed:  summary.FilesFailed,
+		Findings:     summary.Findings,
+		BySeverity:   jsonCounts(summary.BySeverity),
+		ByCategory:   jsonCounts(summary.ByCategory),
+		BySource:     jsonCounts(summary.BySource),
+	}
+}
+
+func jsonCounts(counts []result.Count) []jsonCount {
+	rows := make([]jsonCount, 0, len(counts))
+	for _, count := range counts {
+		rows = append(rows, jsonCount{Name: count.Name, Count: count.Count})
+	}
+
+	return rows
+}
+
+func encodeJSON(payload any) (string, error) {
 	encoded, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
 		return "", fmt.Errorf("encode JSON result: %w", err)

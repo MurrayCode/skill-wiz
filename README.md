@@ -139,6 +139,7 @@ skill-wiz ~/.claude/skills ./team-skills              # directories and files to
 | `--timeout` | `1m` | Maximum time to wait for the analysis leg |
 | `--fail-on` | `error` | Lowest finding severity that fails the run: `error`, `warning`, or `info` |
 | `--concurrency` | `8` | How many files to scan at once |
+| `--summary` | `false` | Add a run-level summary to the console, and switch `--json` to the `{summary, results}` shape |
 | `--policy` | — | Path to a policy file; defaults to `.skill-wiz.yaml` in the working directory |
 | `--profile` | — | Policy profile to apply; the base policy is used when omitted |
 
@@ -319,6 +320,24 @@ The tally counts the files that were actually scanned, so a run where one file f
 so. A single-file run prints no tally — its `Scan flagged N finding(s)` line already says the same
 thing.
 
+`--summary` adds a run-level breakdown beneath the tally, on a single-file run as much as a
+directory scan:
+
+```console
+$ skill-wiz --summary examples
+
+Summary
+Files: 3 scanned · 1 clean · 2 flagged · 0 failed
+Severity: 1 error, 3 warning
+Category: 2 mismatch, 1 shell, 1 url
+Source: 4 rule
+```
+
+Category and source rows are ordered by count descending, then name ascending, so two runs over the
+same skills produce the same rows in the same order and a diff shows only what changed. Findings a
+policy switched `off` are absent from every figure — they are not findings by the time the run
+counts them.
+
 Long evidence is truncated to 200 characters with a trailing `…` so one snippet cannot swamp the
 console. The HTML report always carries the full text.
 
@@ -354,10 +373,35 @@ carries `"overridden_from"` with the severity it had before — additive, and ab
 A single file emits that object; a run over several files emits a JSON **array** of the same object,
 one entry per scanned file, each carrying the same `report_path`.
 
+`--summary` switches the payload to one object instead, with `results` always an array whatever the
+file count:
+
+```json
+{
+  "summary": {
+    "files_scanned": 3,
+    "files_clean": 1,
+    "files_flagged": 2,
+    "files_failed": 0,
+    "findings": 4,
+    "by_severity": [{ "name": "error", "count": 1 }, { "name": "warning", "count": 3 }],
+    "by_category": [{ "name": "mismatch", "count": 2 }, { "name": "shell", "count": 1 }],
+    "by_source": [{ "name": "rule", "count": 4 }]
+  },
+  "results": [{ "path": "examples/CLEANSKILL.md", "...": "..." }]
+}
+```
+
+The default output is untouched by this — object for one file, array for several — so anything
+already parsing it keeps working. Files that failed to scan are counted in `files_failed` and have no
+entry in `results`.
+
 ### HTML report
 
 Every run also writes a self-contained `skill-wiz-report.html` to the working directory: findings
-grouped by severity, with category, source, and evidence for each. No external assets, so it opens
+grouped by severity, with category, source, and evidence for each, headed by the run summary. The
+report shows the summary on every run with no flag needed — it is the one surface with room for it,
+and the page already covers the whole run. No external assets, so it opens
 straight from disk. One run writes one report however many files it covered — every scanned skill
 lands on the same page, with a picker to move between them. Each run overwrites the last, and a
 report that cannot be written is a warning — never a failed scan.

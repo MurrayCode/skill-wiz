@@ -103,6 +103,18 @@ func TestParseOptions(t *testing.T) {
 			},
 		},
 		{
+			name: "summary is parsed",
+			args: []string{"--summary", "skill.md"},
+			want: options{
+				paths:       []string{"skill.md"},
+				model:       analyse.DefaultModel,
+				timeout:     analyse.DefaultTimeout,
+				failOn:      result.SeverityError,
+				concurrency: defaultConcurrency,
+				summary:     true,
+			},
+		},
+		{
 			name: "profile name is parsed and trimmed",
 			args: []string{"--profile", " ci ", "skill.md"},
 			want: options{
@@ -2087,5 +2099,229 @@ func TestRunWithSeverityOverrides(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestRunSummary(t *testing.T) {
+	tests := []struct {
+		name        string
+		args        []string
+		wantOutput  []string
+		wantMissing []string
+	}{
+		{
+			name: "a single-file run prints the breakdown too",
+			args: []string{"--summary", "examples/HIDDENBASHSKILL.md"},
+			wantOutput: []string{
+				"\nSummary\n",
+				"Files: 1 scanned · 0 clean · 1 flagged · 0 failed",
+				"Severity: 1 error, 1 warning",
+				"Category: 1 mismatch, 1 shell",
+				"Source: 2 rule",
+			},
+		},
+		{
+			name: "the summary follows the multi-file tally",
+			args: []string{"--summary", "examples"},
+			wantOutput: []string{
+				"3 files scanned · 1 clean · 2 flagged · 4 findings",
+				"\nSummary\n",
+				"Files: 3 scanned · 1 clean · 2 flagged · 0 failed",
+			},
+		},
+		{
+			name: "without the flag nothing is added",
+			args: []string{"examples/HIDDENBASHSKILL.md"},
+			// The report path is a temporary directory named after the test, so
+			// match the summary heading as it is actually printed rather than
+			// the bare word.
+			wantMissing: []string{"\nSummary\n", "Files:"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reportDestination := filepath.Join(t.TempDir(), "skill-wiz-report.html")
+			originalReportPath := reportPath
+			reportPath = func() (string, error) { return reportDestination, nil }
+			defer func() { reportPath = originalReportPath }()
+
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+
+			run(tt.args, &stdout, &stderr, false)
+
+			for _, want := range tt.wantOutput {
+				if !strings.Contains(stdout.String(), want) {
+					t.Fatalf("run() stdout = %q, want substring %q", stdout.String(), want)
+				}
+			}
+			for _, missing := range tt.wantMissing {
+				if strings.Contains(stdout.String(), missing) {
+					t.Fatalf("run() stdout = %q, want no substring %q", stdout.String(), missing)
+				}
+			}
+		})
+	}
+}
+
+func TestRunSummaryJSON(t *testing.T) {
+	tests := []struct {
+		name       string
+		args       []string
+		wantObject bool
+	}{
+		{
+			name:       "one file with --summary is the summary object",
+			args:       []string{"--json", "--summary", "examples/HIDDENBASHSKILL.md"},
+			wantObject: true,
+		},
+		{
+			name:       "several files with --summary is the same object",
+			args:       []string{"--json", "--summary", "examples"},
+			wantObject: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reportDestination := filepath.Join(t.TempDir(), "skill-wiz-report.html")
+			originalReportPath := reportPath
+			reportPath = func() (string, error) { return reportDestination, nil }
+			defer func() { reportPath = originalReportPath }()
+
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+
+			run(tt.args, &stdout, &stderr, false)
+
+			var decoded jsonRun
+			if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
+				t.Fatalf("json.Unmarshal() error = %v, output = %q", err, stdout.String())
+			}
+			if len(decoded.Results) != decoded.Summary.FilesScanned {
+				t.Fatalf("len(results) = %d, want summary.files_scanned = %d", len(decoded.Results), decoded.Summary.FilesScanned)
+			}
+
+			// The summary must agree with the detail it sits beside.
+			findings := 0
+			for _, entry := range decoded.Results {
+				findings += len(entry.Findings)
+			}
+			if decoded.Summary.Findings != findings {
+				t.Fatalf("summary.findings = %d, want %d", decoded.Summary.Findings, findings)
+			}
+			total := 0
+			for _, row := range decoded.Summary.ByCategory {
+				total += row.Count
+			}
+			if total != findings {
+				t.Fatalf("by_category totals %d, want %d", total, findings)
+			}
+		})
+	}
+}
+
+func TestRunDefaultJSONIsUnchangedBySummarySupport(t *testing.T) {
+	tests := []struct {
+		name  string
+		args  []string
+		first byte
+	}{
+		{name: "one file stays an object", args: []string{"--json", "examples/HIDDENBASHSKILL.md"}, first: '{'},
+		{name: "several files stay an array", args: []string{"--json", "examples"}, first: '['},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reportDestination := filepath.Join(t.TempDir(), "skill-wiz-report.html")
+			originalReportPath := reportPath
+			reportPath = func() (string, error) { return reportDestination, nil }
+			defer func() { reportPath = originalReportPath }()
+
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+
+			run(tt.args, &stdout, &stderr, false)
+
+			trimmed := strings.TrimSpace(stdout.String())
+			if trimmed == "" || trimmed[0] != tt.first {
+				t.Fatalf("run(--json) output starts with %q, want %q", trimmed[:1], string(tt.first))
+			}
+			if strings.Contains(trimmed, `"summary"`) {
+				t.Fatalf("run(--json) output carries a summary without --summary: %s", trimmed)
+			}
+		})
+	}
+}
+
+func TestRunSummaryCountsFailedFilesAndOmitsThemFromResults(t *testing.T) {
+	directory := t.TempDir()
+	if err := os.WriteFile(filepath.Join(directory, "good.md"), []byte("---\nname: good skill\ndescription: returns hello world\n---\nSay hello world."), 0o644); err != nil {
+		t.Fatalf("os.WriteFile() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "bad.md"), []byte("this file has no frontmatter"), 0o644); err != nil {
+		t.Fatalf("os.WriteFile() error = %v", err)
+	}
+
+	reportDestination := filepath.Join(t.TempDir(), "skill-wiz-report.html")
+	originalReportPath := reportPath
+	reportPath = func() (string, error) { return reportDestination, nil }
+	defer func() { reportPath = originalReportPath }()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	if got := run([]string{"--json", "--summary", directory}, &stdout, &stderr, false); got != exitFailure {
+		t.Fatalf("run() code = %d, want %d", got, exitFailure)
+	}
+
+	var decoded jsonRun
+	if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v, output = %q", err, stdout.String())
+	}
+	if decoded.Summary.FilesFailed != 1 {
+		t.Fatalf("summary.files_failed = %d, want 1", decoded.Summary.FilesFailed)
+	}
+	if decoded.Summary.FilesScanned != 1 {
+		t.Fatalf("summary.files_scanned = %d, want 1", decoded.Summary.FilesScanned)
+	}
+	if len(decoded.Results) != 1 {
+		t.Fatalf("len(results) = %d, want 1", len(decoded.Results))
+	}
+	if strings.Contains(stdout.String(), "bad.md") {
+		t.Fatalf("run(--json) results include the file that failed to scan: %s", stdout.String())
+	}
+
+	page, err := os.ReadFile(reportDestination)
+	if err != nil {
+		t.Fatalf("os.ReadFile(report) error = %v", err)
+	}
+	if !strings.Contains(string(page), "<b>1</b> failed") {
+		t.Fatal("report does not record the file that failed to scan")
+	}
+}
+
+func TestRunReportAlwaysCarriesTheSummary(t *testing.T) {
+	reportDestination := filepath.Join(t.TempDir(), "skill-wiz-report.html")
+	originalReportPath := reportPath
+	reportPath = func() (string, error) { return reportDestination, nil }
+	defer func() { reportPath = originalReportPath }()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	// No --summary flag: the report shows the run summary regardless, and for a
+	// single-file run as much as for a directory.
+	run([]string{"examples/HIDDENBASHSKILL.md"}, &stdout, &stderr, false)
+
+	page, err := os.ReadFile(reportDestination)
+	if err != nil {
+		t.Fatalf("os.ReadFile(report) error = %v", err)
+	}
+	for _, want := range []string{"Run summary", "<b>1</b> scanned", "<b>2</b> findings", "1 shell", "1 mismatch", "2 rule"} {
+		if !strings.Contains(string(page), want) {
+			t.Fatalf("report missing %q", want)
+		}
 	}
 }

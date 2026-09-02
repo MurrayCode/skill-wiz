@@ -41,7 +41,8 @@ Data flows one way, and every layer returns findings rather than printing:
   (empty unless a deterministic rule produced it) and `OverriddenFrom` (set only when policy changed
   the severity); `Result` wraps
   `[]Finding` with `Clean()`. It also owns the shared severity vocabulary — `Severities`, `Known`,
-  `GateRank`, `DisplayRank` — plus `FormatSources` and `Pluralize`. Nothing here knows about skills,
+  `GateRank`, `DisplayRank` — plus `FormatSources`, `Pluralize`, and `Summarize`/`Summary`/`Count`,
+  the run-level aggregate (files failed is passed in, because `result` knows nothing about paths). Nothing here knows about skills,
   rules, or the LLM — add new producers, not new coupling.
 - **`skill`** parses and validates only. `Parse` normalises CRLF and accepts both a `\n---\n` closing
   fence and a trailing `\n---` at EOF. `Validate` returns `ValidationErrors` (a slice of field-level
@@ -76,7 +77,9 @@ Data flows one way, and every layer returns findings rather than printing:
   which arrives as a `render.Style` value. JSON stays in `main`: it is an output contract, not
   console presentation.
 - **`report`** renders a run into one self-contained HTML page from the embedded
-  `report/template.html`. `Render`/`Write` are variadic over `Input` (one per scanned skill): a single
+  `report/template.html`. `Render`/`Write` take a `Run` (only what cannot be derived from the
+  inputs — the count of files that failed to scan) and are variadic over `Input` (one per scanned
+  skill): a single
   skill renders exactly as before, several render as stacked `.skill` sections plus a `<select>`
   picker. It imports `result` only — it knows nothing about skills or rules. Every field goes through
   `html/template`, which is what keeps hostile skill text from becoming markup; don't swap in
@@ -150,6 +153,13 @@ Data flows one way, and every layer returns findings rather than printing:
   `render.Style`. Never sniff `os.Stdout` inside the `render` package — the tests write to buffers, and
   colour must stay absent there. Only the severity label is coloured, so the rest of a line stays
   greppable.
+- **The summary is opt-in on the console and in JSON, and always on in the report.** `--summary`
+  appends `render.WithSummary` to the console output and switches `--json` to
+  `{"summary": ..., "results": [...]}` with `results` always an array. Without the flag the JSON is
+  exactly what it has always been — object for one file, array for several — because an array has
+  nowhere to put a summary and changing the default would break existing callers silently. The HTML
+  report renders the summary on every run and derives it from the inputs it is about to show, so the
+  figures at the top cannot disagree with the cards below.
 - **The tally is multi-file only.** `render.Scans` closes a run over more than one file with one
   `N files scanned · … · N findings (…)` line counting the files it actually scanned. A single-file
   run prints nothing extra, so its output is unchanged.

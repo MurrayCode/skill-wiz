@@ -1,6 +1,7 @@
 package report
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -147,7 +148,7 @@ func TestRender(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := Render(tt.input)
+			got, err := Render(Run{}, tt.input)
 			if err != nil {
 				t.Fatalf("Render() error = %v, want nil", err)
 			}
@@ -167,7 +168,7 @@ func TestRender(t *testing.T) {
 }
 
 func TestRenderOrdersFindingsBySeverity(t *testing.T) {
-	got, err := Render(Input{
+	got, err := Render(Run{}, Input{
 		SkillName:  "ordering skill",
 		SourcePath: "skill.md",
 		Result: result.NewResult(
@@ -216,7 +217,7 @@ func TestWrite(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			destination := filepath.Join(t.TempDir(), tt.destination)
 
-			if err := Write(destination, Input{
+			if err := Write(destination, Run{}, Input{
 				SkillName:  "written skill",
 				SourcePath: "skill.md",
 				Result:     result.NewCleanResult(),
@@ -241,7 +242,7 @@ func TestWrite(t *testing.T) {
 func TestRenderMultipleSkills(t *testing.T) {
 	generatedAt := time.Date(2026, 8, 30, 14, 5, 0, 0, time.UTC)
 
-	got, err := Render(
+	got, err := Render(Run{},
 		Input{
 			SkillName:   "clean skill",
 			SourcePath:  filepath.Join("examples", "CLEANSKILL.md"),
@@ -286,7 +287,7 @@ func TestRenderMultipleSkills(t *testing.T) {
 }
 
 func TestRenderSingleSkillHasNoPicker(t *testing.T) {
-	got, err := Render(Input{
+	got, err := Render(Run{}, Input{
 		SkillName:  "only skill",
 		SourcePath: "skill.md",
 		Result:     result.NewCleanResult(),
@@ -306,7 +307,7 @@ func TestRenderSingleSkillHasNoPicker(t *testing.T) {
 }
 
 func TestRenderWithoutScans(t *testing.T) {
-	if _, err := Render(); err == nil {
+	if _, err := Render(Run{}); err == nil {
 		t.Fatal("Render() error = nil, want an error for an empty run")
 	}
 }
@@ -339,7 +340,7 @@ func TestRenderLabelsDisambiguateSharedFileNames(t *testing.T) {
 				inputs = append(inputs, Input{SkillName: "shared", SourcePath: path, Result: result.NewCleanResult()})
 			}
 
-			got, err := Render(inputs...)
+			got, err := Render(Run{}, inputs...)
 			if err != nil {
 				t.Fatalf("Render() error = %v, want nil", err)
 			}
@@ -354,7 +355,7 @@ func TestRenderLabelsDisambiguateSharedFileNames(t *testing.T) {
 }
 
 func TestRenderEscapesPickerLabels(t *testing.T) {
-	got, err := Render(
+	got, err := Render(Run{},
 		Input{SkillName: "first", SourcePath: "first.md", Result: result.NewCleanResult()},
 		Input{SkillName: "second", SourcePath: "</option><script>alert('label')</script>.md", Result: result.NewCleanResult()},
 	)
@@ -370,7 +371,7 @@ func TestRenderEscapesPickerLabels(t *testing.T) {
 func TestWriteMultipleSkills(t *testing.T) {
 	destination := filepath.Join(t.TempDir(), "skill-wiz-report.html")
 
-	if err := Write(destination,
+	if err := Write(destination, Run{},
 		Input{SkillName: "first skill", SourcePath: "first.md", Result: result.NewCleanResult()},
 		Input{SkillName: "second skill", SourcePath: "second.md", Result: result.NewCleanResult()},
 	); err != nil {
@@ -439,7 +440,7 @@ func TestRenderAnalysisSkipped(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := Render(tt.inputs...)
+			got, err := Render(Run{}, tt.inputs...)
 			if err != nil {
 				t.Fatalf("Render() error = %v, want nil", err)
 			}
@@ -490,7 +491,7 @@ func TestRenderMarksAnOverriddenSeverity(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := Render(Input{
+			got, err := Render(Run{}, Input{
 				SkillName:  "test skill",
 				SourcePath: "skill.md",
 				Result:     result.NewResult(tt.finding),
@@ -510,5 +511,102 @@ func TestRenderMarksAnOverriddenSeverity(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestRenderSummary(t *testing.T) {
+	flagged := Input{
+		SkillName:  "flagged skill",
+		SourcePath: "flagged.md",
+		Result: result.NewResult(
+			result.Finding{Source: result.SourceRule, Category: result.Category("shell"), Severity: result.SeverityError, Message: "shell"},
+			result.Finding{Source: result.SourceAnalyzer, Category: result.Category("hidden"), Severity: result.SeverityWarning, Message: "hidden"},
+		),
+	}
+	clean := Input{SkillName: "clean skill", SourcePath: "clean.md", Result: result.NewCleanResult()}
+
+	tests := []struct {
+		name   string
+		run    Run
+		inputs []Input
+		want   []string
+	}{
+		{
+			name:   "a single-file run still gets a summary",
+			inputs: []Input{flagged},
+			want: []string{
+				"Run summary",
+				"<b>1</b> scanned",
+				"<b>0</b> clean",
+				"<b>1</b> flagged",
+				"<b>2</b> findings",
+				`<span class="count severity-error">1 error</span>`,
+			},
+		},
+		{
+			name:   "a run over several files counts them all",
+			run:    Run{FilesFailed: 2},
+			inputs: []Input{flagged, clean},
+			want: []string{
+				"<b>2</b> scanned",
+				"<b>1</b> clean",
+				"<b>1</b> flagged",
+				"<b>2</b> failed",
+				">1 shell<",
+				">1 hidden<",
+				">1 rule<",
+				">1 analyzer<",
+			},
+		},
+		{
+			name:   "a clean run has figures but no breakdown rows",
+			inputs: []Input{clean},
+			want:   []string{"<b>1</b> scanned", "<b>0</b> findings"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := Render(tt.run, tt.inputs...)
+			if err != nil {
+				t.Fatalf("Render() error = %v, want nil", err)
+			}
+
+			for _, want := range tt.want {
+				if !strings.Contains(got, want) {
+					t.Fatalf("Render() = %q, want substring %q", got, want)
+				}
+			}
+		})
+	}
+}
+
+func TestRenderSummaryCountsAgreeWithTheFindings(t *testing.T) {
+	inputs := []Input{
+		{SkillName: "one", SourcePath: "one.md", Result: result.NewResult(
+			result.Finding{Source: result.SourceRule, Category: result.Category("shell"), Severity: result.SeverityError},
+			result.Finding{Source: result.SourceRule, Category: result.Category("url"), Severity: result.SeverityWarning},
+		)},
+		{SkillName: "two", SourcePath: "two.md", Result: result.NewResult(
+			result.Finding{Source: result.SourceAnalyzer, Category: result.Category("shell"), Severity: result.SeverityWarning},
+		)},
+	}
+
+	got, err := Render(Run{}, inputs...)
+	if err != nil {
+		t.Fatalf("Render() error = %v, want nil", err)
+	}
+
+	findings := 0
+	for _, input := range inputs {
+		findings += len(input.Result.Findings)
+	}
+	if !strings.Contains(got, fmt.Sprintf("<b>%d</b> findings", findings)) {
+		t.Fatalf("Render() summary does not report %d findings", findings)
+	}
+	// shell occurs twice across the two skills, so it must lead the category
+	// breakdown rather than being counted per file.
+	if !strings.Contains(got, ">2 shell<") {
+		t.Fatal("Render() summary does not aggregate categories across files")
 	}
 }

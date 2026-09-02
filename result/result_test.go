@@ -1,6 +1,9 @@
 package result
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
 func TestResultClean(t *testing.T) {
 	tests := []struct {
@@ -310,5 +313,124 @@ func TestPluralize(t *testing.T) {
 				t.Fatalf("Pluralize(%d, %q) = %q, want %q", tt.count, tt.noun, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestSummarize(t *testing.T) {
+	shell := Finding{Source: SourceRule, Category: Category("shell"), Severity: SeverityError, Message: "shell"}
+	mismatch := Finding{Source: SourceRule, Category: Category("mismatch"), Severity: SeverityWarning, Message: "mismatch"}
+	hidden := Finding{Source: SourceAnalyzer, Category: Category("hidden"), Severity: SeverityWarning, Message: "hidden"}
+	note := Finding{Source: SourceAnalyzer, Category: Category("shell"), Severity: SeverityInfo, Message: "note"}
+
+	tests := []struct {
+		name        string
+		results     []Result
+		filesFailed int
+		want        Summary
+	}{
+		{
+			name:    "an empty run counts nothing",
+			results: nil,
+			want:    Summary{BySeverity: []Count{}, ByCategory: []Count{}, BySource: []Count{}},
+		},
+		{
+			name:    "a clean run counts the file and no findings",
+			results: []Result{NewCleanResult()},
+			want: Summary{
+				FilesScanned: 1,
+				FilesClean:   1,
+				BySeverity:   []Count{},
+				ByCategory:   []Count{},
+				BySource:     []Count{},
+			},
+		},
+		{
+			name:        "failures are counted separately from scanned files",
+			results:     []Result{NewCleanResult()},
+			filesFailed: 2,
+			want: Summary{
+				FilesScanned: 1,
+				FilesClean:   1,
+				FilesFailed:  2,
+				BySeverity:   []Count{},
+				ByCategory:   []Count{},
+				BySource:     []Count{},
+			},
+		},
+		{
+			name: "breakdowns rank by count then name",
+			results: []Result{
+				NewResult(shell, mismatch, note),
+				NewResult(hidden),
+				NewCleanResult(),
+			},
+			want: Summary{
+				FilesScanned: 3,
+				FilesClean:   1,
+				FilesFlagged: 2,
+				Findings:     4,
+				BySeverity:   []Count{{Name: "error", Count: 1}, {Name: "warning", Count: 2}, {Name: "info", Count: 1}},
+				ByCategory:   []Count{{Name: "shell", Count: 2}, {Name: "hidden", Count: 1}, {Name: "mismatch", Count: 1}},
+				BySource:     []Count{{Name: "analyzer", Count: 2}, {Name: "rule", Count: 2}},
+			},
+		},
+		{
+			name:    "an unrecognised severity never leads the breakdown",
+			results: []Result{NewResult(Finding{Source: SourceRule, Category: Category("odd"), Severity: Severity("critical")}, note)},
+			want: Summary{
+				FilesScanned: 1,
+				FilesFlagged: 1,
+				Findings:     2,
+				BySeverity:   []Count{{Name: "info", Count: 1}, {Name: "critical", Count: 1}},
+				ByCategory:   []Count{{Name: "odd", Count: 1}, {Name: "shell", Count: 1}},
+				BySource:     []Count{{Name: "analyzer", Count: 1}, {Name: "rule", Count: 1}},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := Summarize(tt.results, tt.filesFailed)
+
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("Summarize() = %#v, want %#v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSummarizeCountsMatchTheFindings(t *testing.T) {
+	// The summary is only useful if it agrees with the detail it sits above, so
+	// derive both from the same fixture and compare.
+	results := []Result{
+		NewResult(
+			Finding{Source: SourceRule, Category: Category("shell"), Severity: SeverityError},
+			Finding{Source: SourceRule, Category: Category("url"), Severity: SeverityWarning},
+		),
+		NewResult(Finding{Source: SourceAnalyzer, Category: Category("hidden"), Severity: SeverityWarning}),
+		NewCleanResult(),
+	}
+
+	got := Summarize(results, 0)
+
+	findings := 0
+	for _, scanned := range results {
+		findings += len(scanned.Findings)
+	}
+	if got.Findings != findings {
+		t.Fatalf("Summarize().Findings = %d, want %d", got.Findings, findings)
+	}
+
+	for _, breakdown := range [][]Count{got.BySeverity, got.ByCategory, got.BySource} {
+		total := 0
+		for _, row := range breakdown {
+			total += row.Count
+		}
+		if total != findings {
+			t.Fatalf("breakdown %v totals %d, want %d", breakdown, total, findings)
+		}
+	}
+	if got.FilesClean+got.FilesFlagged != got.FilesScanned {
+		t.Fatalf("clean %d + flagged %d != scanned %d", got.FilesClean, got.FilesFlagged, got.FilesScanned)
 	}
 }
